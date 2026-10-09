@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+
+.git/
+.github/
+.idea/
+.cache/
+build/
+build-*/
+cmake-build-*/
+out/
+coverage/
+benchmark_charts/
+BENCHMARK.md
+*.deb
+*.rpm
+*.7z
+*.sh
+*.zip
+*.tar.gz
+*.tar.Z

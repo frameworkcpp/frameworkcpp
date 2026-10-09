@@ -5,86 +5,241 @@ name: CI
 on:
   push:
     branches: [master]
-    tags: ['v*']
+    tags: ['*']
   pull_request:
   workflow_dispatch:
 
+concurrency:
+  group: ci-${{ github.ref_type }}-${{ github.ref_name }}
+  cancel-in-progress: true
+
 jobs:
-  ci:
+  # One job per (architecture, build type). Every job runs inside an Ubuntu
+  # container of the target architecture, emulated via QEMU (binfmt) for the
+  # non-native archs, so all build types are exercised on every architecture.
+  build:
     if: github.ref_type != 'tag'
-    name: ${{ matrix.arch }} / ${{ matrix.preset }}
-    runs-on: ${{ matrix.arch == 'amd64' && 'ubuntu-24.04' || 'ubuntu-24.04-arm' }}
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: [amd64, arm64]
-        preset: [asan, tsan, ubsan, release]
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Configure
-        run: cmake --preset ${{ matrix.preset }}
-
-      - name: Build
-        run: cmake --build --preset ${{ matrix.preset }} -j$(nproc)
-
-      - name: Test
-        run: |
-          case "${{ matrix.preset }}" in
-            asan)
-              export ASAN_OPTIONS=detect_leaks=1:halt_on_error=1
-              ctest --preset asan --output-on-failure
-              ;;
-            tsan)
-              # TSAN maps its shadow memory at fixed addresses; under
-              # high-entropy ASLR the binary can land out of range, so run
-              # with randomization disabled.
-              setarch $(uname -m) -R ctest --preset tsan --output-on-failure
-              ;;
-            ubsan)
-              export UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1
-              ctest --preset ubsan --output-on-failure
-              ;;
-            release)
-              ctest --preset release --output-on-failure
-              ;;
-          esac
-
-  release:
-    # Only runs when a tag matching v* is pushed; builds native packages per
-    # architecture and uploads them to the GitHub Release for that tag.
-    if: startsWith(github.ref, 'refs/tags/v')
-    name: package-${{ matrix.arch }}
-    permissions:
-      contents: write
+    name: build-${{ matrix.arch }}-${{ matrix.config }}
     runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
     strategy:
       fail-fast: false
       matrix:
-        arch: [amd64, arm64]
+        arch: [amd64, arm64, armv7, ppc64le, i386, riscv64, s390x]
+        config: [debug, asan, tsan, ubsan, release]
+        exclude:
+          # ThreadSanitizer requires a 64-bit target.
+          - arch: armv7
+            config: tsan
+          - arch: i386
+            config: tsan
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install packaging tools
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Map platform
+        id: map
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq rpm zip
+          case "${{ matrix.arch }}" in
+            arm64)   p=linux/arm64;;
+            armv7)   p=linux/arm/v7;;
+            ppc64le) p=linux/ppc64le;;
+            i386)    p=linux/386;;
+            riscv64) p=linux/riscv64;;
+            s390x)   p=linux/s390x;;
+            *)       p=linux/amd64;;
+          esac
+          echo "platform=$p" >> "$GITHUB_OUTPUT"
 
-      - name: Configure
-        run: cmake --preset release -DFRAMEWORKCPP_BUILD_TESTING=OFF
+      - name: Configure, build and test
+        env:
+          PLATFORM: ${{ steps.map.outputs.platform }}
+          CONFIG: ${{ matrix.config }}
+          CMAKE_BUILD_PARALLEL_LEVEL: '2'
+        run: |
+          docker run --rm \
+            --platform "$PLATFORM" \
+            --security-opt seccomp=unconfined \
+            -e CONFIG \
+            -e CMAKE_BUILD_PARALLEL_LEVEL \
+            -v "$PWD:/src" -w /src \
+            ubuntu:24.04 \
+            bash -euxo pipefail -c '
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update -qq
+              apt-get install -y -qq cmake ninja-build g++ clang
+              cmake --preset "$CONFIG"
+              cmake --build --preset "$CONFIG"
+              if [ "$CONFIG" = tsan ]; then
+                # TSAN maps its shadow memory at fixed addresses; under
+                # high-entropy ASLR the binary can land out of range, so run
+                # the test with randomization disabled when possible.
+                if setarch $(uname -m) -R true 2>/dev/null; then
+                  setarch $(uname -m) -R ctest --preset tsan --output-on-failure
+                else
+                  ctest --preset tsan --output-on-failure
+                fi
+              else
+                ctest --preset "$CONFIG" --output-on-failure
+              fi
+            '
 
-      - name: Build
-        run: cmake --build --preset release -j$(nproc)
+  # One job per architecture. CPack runs INSIDE the emulated container, so each
+  # .deb/.rpm/.tar.gz/... is produced by that architecture's own dpkg/rpmbuild
+  # running under QEMU and ships as a native package for its platform.
+  package:
+    if: startsWith(github.ref, 'refs/tags/')
+    name: package-${{ matrix.arch }}
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64, armv7, ppc64le, i386, riscv64, s390x]
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Package
-        run: cmake --build --preset release --target package
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Map platform
+        id: map
+        run: |
+          case "${{ matrix.arch }}" in
+            arm64)   p=linux/arm64;;
+            armv7)   p=linux/arm/v7;;
+            ppc64le) p=linux/ppc64le;;
+            i386)    p=linux/386;;
+            riscv64) p=linux/riscv64;;
+            s390x)   p=linux/s390x;;
+            *)       p=linux/amd64;;
+          esac
+          echo "platform=$p" >> "$GITHUB_OUTPUT"
+
+      - name: Build and package inside the architecture container
+        env:
+          PLATFORM: ${{ steps.map.outputs.platform }}
+          CMAKE_BUILD_PARALLEL_LEVEL: '2'
+        run: |
+          docker run --rm \
+            --platform "$PLATFORM" \
+            -e CMAKE_BUILD_PARALLEL_LEVEL \
+            -v "$PWD:/src" -w /src \
+            ubuntu:24.04 \
+            bash -euxo pipefail -c '
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update -qq
+              apt-get install -y -qq cmake ninja-build g++ rpm zip
+              cmake --preset release -DFRAMEWORKCPP_BUILD_TESTING=OFF
+              cmake --build --preset release
+              cmake --build --preset release --target package
+            '
 
       - name: List packages
         run: ls -lh build/release/frameworkcpp-*
 
-      - name: Upload to release
+      - name: Upload packages to release
         uses: softprops/action-gh-release@v2
         with:
           files: build/release/frameworkcpp-*
+
+  # Release-only. Only this path pushes to the container registries: one job per
+  # architecture builds the toolchain image, then the merge job combines them
+  # into a single multi-arch manifest.
+  container:
+    if: startsWith(github.ref, 'refs/tags/')
+    name: container-${{ matrix.arch }}
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: amd64,   platform: linux/amd64 }
+          - { arch: arm64,   platform: linux/arm64 }
+          - { arch: armv7,   platform: linux/arm/v7 }
+          - { arch: ppc64le, platform: linux/ppc64le }
+          - { arch: i386,    platform: linux/386 }
+          - { arch: riscv64, platform: linux/riscv64 }
+          - { arch: s390x,   platform: linux/s390x }
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USER }}
+          password: ${{ secrets.DOCKERHUB_PAT }}
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ secrets.GHCR_USER }}
+          password: ${{ secrets.GHCR_PAT }}
+
+      - name: Build and push image (${{ matrix.arch }})
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ matrix.platform }}
+          push: true
+          tags: |
+            iantorres/frameworkcpp:${{ matrix.arch }}
+            ghcr.io/frameworkcpp/frameworkcpp:${{ matrix.arch }}
+
+  merge:
+    if: startsWith(github.ref, 'refs/tags/')
+    name: merge-manifest
+    runs-on: ubuntu-24.04
+    needs: container
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USER }}
+          password: ${{ secrets.DOCKERHUB_PAT }}
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ secrets.GHCR_USER }}
+          password: ${{ secrets.GHCR_PAT }}
+
+      - name: Merge and publish multi-arch manifest
+        run: |
+          ARCHS="amd64 arm64 armv7 ppc64le i386 riscv64 s390x"
+          VERSION="${{ github.ref_name }}"
+          for repo in iantorres/frameworkcpp ghcr.io/frameworkcpp/frameworkcpp; do
+            IMAGES=""
+            for a in $ARCHS; do
+              IMAGES="$IMAGES $repo:$a"
+            done
+            docker buildx imagetools create -t "$repo:latest" $IMAGES
+            docker buildx imagetools create -t "$repo:$VERSION" $IMAGES
+          done
+
+      - name: Inspect merged manifests
+        run: |
+          docker buildx imagetools inspect iantorres/frameworkcpp:latest
+          docker buildx imagetools inspect ghcr.io/frameworkcpp/frameworkcpp:latest
