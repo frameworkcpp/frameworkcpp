@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+
+build/
+build-*/
+cmake-build-*/
+out/
+.cache/
+.vscode/
+.idea/
+*.user
+
+compile_commands.json
+
+*.gcno
+*.gcda
+*.gcov
+*.info
+coverage.info
+coverage/
+benchmark_charts/
+BENCHMARK.md
+
+CPackConfig.cmake
+CPackSourceConfig.cmake
+_deps/

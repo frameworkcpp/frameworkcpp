@@ -1,0 +1,90 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+
+name: CI
+
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  ci:
+    if: github.ref_type != 'tag'
+    name: ${{ matrix.arch }} / ${{ matrix.preset }}
+    runs-on: ${{ matrix.arch == 'amd64' && 'ubuntu-24.04' || 'ubuntu-24.04-arm' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+        preset: [asan, tsan, ubsan, release]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake --preset ${{ matrix.preset }}
+
+      - name: Build
+        run: cmake --build --preset ${{ matrix.preset }} -j$(nproc)
+
+      - name: Test
+        run: |
+          case "${{ matrix.preset }}" in
+            asan)
+              export ASAN_OPTIONS=detect_leaks=1:halt_on_error=1
+              ctest --preset asan --output-on-failure
+              ;;
+            tsan)
+              # TSAN maps its shadow memory at fixed addresses; under
+              # high-entropy ASLR the binary can land out of range, so run
+              # with randomization disabled.
+              setarch $(uname -m) -R ctest --preset tsan --output-on-failure
+              ;;
+            ubsan)
+              export UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1
+              ctest --preset ubsan --output-on-failure
+              ;;
+            release)
+              ctest --preset release --output-on-failure
+              ;;
+          esac
+
+  release:
+    # Only runs when a tag matching v* is pushed; builds native packages per
+    # architecture and uploads them to the GitHub Release for that tag.
+    if: startsWith(github.ref, 'refs/tags/v')
+    name: package-${{ matrix.arch }}
+    permissions:
+      contents: write
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install packaging tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq rpm zip
+
+      - name: Configure
+        run: cmake --preset release -DFRAMEWORKCPP_BUILD_TESTING=OFF
+
+      - name: Build
+        run: cmake --build --preset release -j$(nproc)
+
+      - name: Package
+        run: cmake --build --preset release --target package
+
+      - name: List packages
+        run: ls -lh build/release/frameworkcpp-*
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/release/frameworkcpp-*
