@@ -2,7 +2,7 @@
 
 # Multi-arch toolchain image to compile applications against frameworkcpp.
 # Built from the Release config on tags. The official docker `ubuntu` image
-# ships manifests for amd64, arm/v7, arm64/v8, ppc64le, riscv64, s390x and 386.
+# ships manifests for amd64, arm/v7, arm64/v8, ppc64le, riscv64 and s390x.
 FROM ubuntu:24.04
 
 ARG DEBIAN_FRONTEND=noninteractive

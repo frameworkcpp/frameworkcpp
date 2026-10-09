@@ -24,13 +24,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arch: [amd64, arm64, armv7, ppc64le, i386, riscv64, s390x]
+        arch: [amd64, arm64, armv7, ppc64le, riscv64, s390x]
         config: [debug, asan, tsan, ubsan, release]
         exclude:
           # ThreadSanitizer requires a 64-bit target.
           - arch: armv7
-            config: tsan
-          - arch: i386
             config: tsan
     steps:
       - name: Checkout
@@ -46,7 +44,6 @@ jobs:
             arm64)   p=linux/arm64;;
             armv7)   p=linux/arm/v7;;
             ppc64le) p=linux/ppc64le;;
-            i386)    p=linux/386;;
             riscv64) p=linux/riscv64;;
             s390x)   p=linux/s390x;;
             *)       p=linux/amd64;;
@@ -96,7 +93,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arch: [amd64, arm64, armv7, ppc64le, i386, riscv64, s390x]
+        arch: [amd64, arm64, armv7, ppc64le, riscv64, s390x]
     permissions:
       contents: write
     steps:
@@ -113,7 +110,6 @@ jobs:
             arm64)   p=linux/arm64;;
             armv7)   p=linux/arm/v7;;
             ppc64le) p=linux/ppc64le;;
-            i386)    p=linux/386;;
             riscv64) p=linux/riscv64;;
             s390x)   p=linux/s390x;;
             *)       p=linux/amd64;;
@@ -162,7 +158,6 @@ jobs:
           - { arch: arm64,   platform: linux/arm64 }
           - { arch: armv7,   platform: linux/arm/v7 }
           - { arch: ppc64le, platform: linux/ppc64le }
-          - { arch: i386,    platform: linux/386 }
           - { arch: riscv64, platform: linux/riscv64 }
           - { arch: s390x,   platform: linux/s390x }
     permissions:
@@ -228,7 +223,7 @@ jobs:
 
       - name: Merge and publish multi-arch manifest
         run: |
-          ARCHS="amd64 arm64 armv7 ppc64le i386 riscv64 s390x"
+          ARCHS="amd64 arm64 armv7 ppc64le riscv64 s390x"
           VERSION="${{ github.ref_name }}"
           for repo in iantorres/frameworkcpp ghcr.io/frameworkcpp/frameworkcpp; do
             IMAGES=""
