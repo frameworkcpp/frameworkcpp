@@ -14,7 +14,7 @@ idea, then the pieces, then the details.
 | Module | Status | Section |
 | --- | --- | --- |
 | Memory Management | documented | [Memory Management](/memory-management/) |
-| Environment (`env`) | planned | — |
+| Environment | documented | [Environment](/environment/) |
 | More | planned | — |
 
 ## License

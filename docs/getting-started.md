@@ -4,8 +4,9 @@ FrameworkCpp is a **header-only C++20 framework** for building real-time
 systems. It is modular: each module is a self-contained set of headers under
 `include/frameworkcpp/<module>/`, and you only pay for the modules you use.
 
-The first documented module is [Memory Management](/memory-management/), the
-arena-backed allocator layer. More modules (environment, …) are on the way.
+The documented modules are [Memory Management](/memory-management/), the
+arena-backed allocator layer, and [Environment](/environment/), a dotenv-style
+configuration store built on top of it. More modules are on the way.
 
 ## What you need
 
@@ -77,5 +78,6 @@ int main()
 ## What's next
 
 Read the [Memory Management](/memory-management/) section to understand the
-model — shards, buckets, concurrency models and smart pointers — before using
-the arena in your own code.
+model — shards, buckets, concurrency models and smart pointers — then the
+[Environment](/environment/) module that builds the configuration store on top
+of it.

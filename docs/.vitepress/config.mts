@@ -32,6 +32,12 @@ export default defineConfig({
           { text: 'Allocators & std::pmr', link: '/memory-management/allocator' },
           { text: 'Configuration', link: '/memory-management/configuration' }
         ]
+      },
+      {
+        text: 'Environment',
+        items: [
+          { text: 'Overview', link: '/environment/' }
+        ]
       }
     ],
 

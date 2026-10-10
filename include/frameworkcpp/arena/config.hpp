@@ -38,10 +38,10 @@ class arena_overflow_error : public std::bad_alloc {
 };
 
 struct object_spec_t {
-    std::uint64_t tag;
-    std::size_t object_size;
+    std::uint64_t tag = 0;
+    std::size_t object_size = 0;
     std::size_t align = alignof(std::max_align_t);
-    std::size_t count;
+    std::size_t count = 0;
 };
 
 // Bounded registries keep arena_t heap-free: shards and regions live in fixed

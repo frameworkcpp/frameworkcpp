@@ -2,7 +2,7 @@
 
 #pragma once
 
-namespace frameworkcpp::env {
+namespace frameworkcpp::environment {
 
 [[nodiscard]] constexpr int version_major() noexcept {
     return 1;
@@ -22,4 +22,4 @@ namespace frameworkcpp::env {
 #endif
 }
 
-} // namespace frameworkcpp::env
+} // namespace frameworkcpp::environment

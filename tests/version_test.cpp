@@ -2,9 +2,9 @@
 
 #include <gtest/gtest.h>
 
-#include "frameworkcpp/env/version.hpp"
+#include "frameworkcpp/environment/version.hpp"
 
-namespace frameworkcpp::env {
+namespace frameworkcpp::environment {
 namespace {
 
 TEST(VersionTest, Major) {
@@ -24,4 +24,4 @@ TEST(VersionTest, String) {
 }
 
 } // namespace
-} // namespace frameworkcpp::env
+} // namespace frameworkcpp::environment
