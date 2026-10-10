@@ -264,6 +264,11 @@ inline view_slot_guard &tls_guard() noexcept {
     return guard;
 }
 
+inline void clear_cache(control_t *control, view_t *view) {
+    for (std::size_t i = 0; i < control->slots; ++i)
+        view->cached[i] = nullptr;
+}
+
 // One pre-allocated view per thread. Views are carved once at init and handed
 // out by index; a thread never frees one, it just marks it inactive on exit so
 // the reclaimer stops waiting for it.
@@ -278,7 +283,7 @@ inline view_t *thread_view(control_t *control) {
     if (index >= control->max_threads)
         return nullptr;
     view_t *view = control->views[index];
-    std::memset(static_cast<void *>(view->cached), 0, control->slots * sizeof(value_cell_t *));
+    clear_cache(control, view);
     view->my_version = control->version.load(std::memory_order_acquire);
     std::atomic_ref<std::uint64_t>(view->published)
         .store(view->my_version, std::memory_order_release);
@@ -288,7 +293,7 @@ inline view_t *thread_view(control_t *control) {
 }
 
 inline void reseed_view(control_t *control, view_t *view, std::uint64_t target) {
-    std::memset(static_cast<void *>(view->cached), 0, control->slots * sizeof(value_cell_t *));
+    clear_cache(control, view);
     view->my_version = target;
 }
 
