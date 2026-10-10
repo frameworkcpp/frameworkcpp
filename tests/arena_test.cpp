@@ -218,5 +218,93 @@ namespace frameworkcpp::arena
             ASSERT_TRUE(shard);
             EXPECT_TRUE(arena.used() <= bytes);
         }
+
+        TEST(ArenaShard, SecondShardKeepsHighAlignment)
+        {
+            arena_t arena;
+            auto a = arena.create_shard(1, {{0, 11, 4, 3}});
+            ASSERT_TRUE(a);
+            auto b = arena.create_shard(2, {{0, 16, 64, 8}, {1, 16, 32, 8}});
+            ASSERT_TRUE(b);
+            auto *p64 = b.allocate_bytes(16, 64);
+            ASSERT_NE(p64, nullptr);
+            EXPECT_EQ(reinterpret_cast<std::uintptr_t>(p64) % 64, 0);
+            auto *p32 = b.allocate_bytes(16, 32);
+            ASSERT_NE(p32, nullptr);
+            EXPECT_EQ(reinterpret_cast<std::uintptr_t>(p32) % 32, 0);
+            auto *p16 = b.allocate_bytes(16, 16);
+            ASSERT_NE(p16, nullptr);
+            EXPECT_EQ(reinterpret_cast<std::uintptr_t>(p16) % 16, 0);
+            b.deallocate(p64);
+            b.deallocate(p32);
+            b.deallocate(p16);
+        }
+
+        TEST(ArenaShard, RejectsInvalidSpecs)
+        {
+            arena_t arena;
+            auto bad_align = arena.create_shard(1, {{0, 16, 3, 8}});
+            auto bad_zero = arena.create_shard(2, {{0, 16, 0, 8}});
+            auto bad_size = arena.create_shard(3, {{0, 0, 8, 8}});
+            auto bad_count = arena.create_shard(4, {{0, 8, 8, 0}});
+            auto bad_overalign = arena.create_shard(5, {{0, 8, 512, 8}});
+            EXPECT_FALSE(bad_align);
+            EXPECT_FALSE(bad_zero);
+            EXPECT_FALSE(bad_size);
+            EXPECT_FALSE(bad_count);
+            EXPECT_FALSE(bad_overalign);
+            auto ok = arena.create_shard(6, {{0, 16, 8, 4}});
+            ASSERT_TRUE(ok);
+        }
+
+        TEST(ArenaShard, DeallocateForeignPointerIsBenign)
+        {
+            arena_t arena;
+            auto shard = arena.create_shard(1, {{0, 8, 8, 8}});
+            auto *p = shard.allocate<std::uint64_t>();
+            ASSERT_NE(p, nullptr);
+            shard.deallocate(p);
+            shard.deallocate_bytes(reinterpret_cast<void *>(0x1234));
+            arena.deallocate_bytes(reinterpret_cast<void *>(0x5678));
+            auto *p2 = shard.allocate<std::uint64_t>();
+            ASSERT_NE(p2, nullptr);
+            shard.deallocate(p2);
+        }
+
+        TEST(ArenaShard, BucketStatsTrackUseAndFrees)
+        {
+            arena_t arena;
+            auto shard = arena.create_shard(1, {{0, 8, 8, 16}});
+            ASSERT_TRUE(shard);
+            EXPECT_EQ(shard.stats(0).in_use, 0);
+            auto *a1 = shard.allocate<std::uint64_t>();
+            auto *a2 = shard.allocate<std::uint64_t>();
+            ASSERT_NE(a1, nullptr);
+            ASSERT_NE(a2, nullptr);
+            EXPECT_EQ(shard.stats(0).in_use, 2);
+            shard.deallocate(a1);
+            shard.deallocate(a2);
+            const auto s = shard.stats(0);
+            EXPECT_EQ(s.in_use, 0);
+            EXPECT_EQ(s.freed, 2);
+            EXPECT_EQ(arena.live(), 0U);
+        }
+
+        TEST(ArenaFootprint, SummedFootprintSizesWholeArenaAtCompileTime)
+        {
+            constexpr object_spec shard_a[] = {{0, 8, 8, 16}};
+            constexpr object_spec shard_b[] = {{0, 64, 8, 8}, {1, 32, 32, 8}};
+            constexpr auto need = round_to_page(shard_footprint(shard_a) + shard_footprint(shard_b));
+            static_assert(need > 0);
+            arena_config config;
+            config.size = need;
+            arena_t arena{config};
+            auto a = arena.create_shard(1, {shard_a[0]});
+            auto b = arena.create_shard(2, {shard_b[0], shard_b[1]});
+            ASSERT_TRUE(a);
+            ASSERT_TRUE(b);
+            EXPECT_EQ(arena.shard_count(), 2U);
+            EXPECT_EQ(arena.capacity(), need);
+        }
     } // namespace
 } // namespace frameworkcpp::arena

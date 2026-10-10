@@ -39,11 +39,24 @@ namespace frameworkcpp::arena
         bool touch_pages = false;
     };
 
+    struct bucket_stats
+    {
+        std::uint64_t tag;
+        std::size_t object_size;
+        std::size_t align;
+        std::uint32_t capacity;
+        std::int64_t in_use;
+        std::int64_t freed;
+    };
+
     namespace detail
     {
         inline constexpr std::size_t kBlockHeaderSize = 8;
         inline constexpr std::size_t kNextSlotOffset = 8;
         inline constexpr std::size_t kLayoutBytes = 24;
+        inline constexpr std::size_t kSlabAlign = 64;
+        inline constexpr std::size_t kMaxBucketAlign = 64;
+        inline constexpr std::size_t kPageSize = 4096;
 
         struct block_header
         {
@@ -56,6 +69,7 @@ namespace frameworkcpp::arena
             std::uint32_t shard_id;
             std::uint32_t bucket_count;
             std::uint64_t tag;
+            std::size_t slice_bytes;
         };
 
         struct bucket_descriptor
@@ -74,7 +88,16 @@ namespace frameworkcpp::arena
             std::int64_t c;
             std::size_t ring_off;
             std::size_t seq_off;
+            std::int64_t in_use;
+            std::int64_t freed;
         };
+
+        inline bool is_pow2(std::size_t n) { return n != 0 && (n & (n - 1)) == 0; }
+
+        inline bool spec_valid(const object_spec &s)
+        {
+            return s.object_size != 0 && s.count != 0 && is_pow2(s.align) && s.align <= kMaxBucketAlign;
+        }
 
         inline std::size_t head_spacing(std::size_t alignment) { return align_up(kLayoutBytes, alignment); }
         inline std::size_t stride_needed(std::size_t object_size, std::size_t alignment)
@@ -103,7 +126,7 @@ namespace frameworkcpp::arena
             }
             for (const auto &s : specs)
                 off += s.count * stride_needed(s.object_size, s.align);
-            return off;
+            return align_up(off, kSlabAlign);
         }
 
         template <std::size_t N>
@@ -120,7 +143,7 @@ namespace frameworkcpp::arena
             }
             for (std::size_t i = 0; i < N; ++i)
                 off += specs[i].count * stride_needed_c(specs[i].object_size, specs[i].align);
-            return off;
+            return align_up_c(off, kSlabAlign);
         }
 
         inline std::byte *run_base(std::byte *base, const bucket_descriptor &d)
@@ -291,6 +314,28 @@ namespace frameworkcpp::arena
             return -1;
         }
 
+        inline void note_alloc(bucket_descriptor &d)
+        {
+            if (static_cast<concurrency_model>(d.model) == concurrency_model::single_thread)
+            {
+                ++d.in_use;
+                return;
+            }
+            std::atomic_ref<std::int64_t>(d.in_use).fetch_add(1, std::memory_order_relaxed);
+        }
+
+        inline void note_free(bucket_descriptor &d)
+        {
+            if (static_cast<concurrency_model>(d.model) == concurrency_model::single_thread)
+            {
+                --d.in_use;
+                ++d.freed;
+                return;
+            }
+            std::atomic_ref<std::int64_t>(d.in_use).fetch_sub(1, std::memory_order_relaxed);
+            std::atomic_ref<std::int64_t>(d.freed).fetch_add(1, std::memory_order_relaxed);
+        }
+
         inline void free_block(std::byte *base, bucket_descriptor &d, std::int64_t idx)
         {
             switch (static_cast<concurrency_model>(d.model))
@@ -382,6 +427,8 @@ namespace frameworkcpp::arena
         arena_bucket create_writer(std::uint64_t tag, concurrency_model model);
         arena_bucket create_reader(std::uint64_t tag, concurrency_model model);
 
+        std::uint32_t bucket_count() const noexcept { return hdr_ ? hdr_->bucket_count : 0; }
+        bucket_stats stats(std::uint32_t index) const noexcept;
         std::uint64_t tag() const noexcept { return hdr_ ? hdr_->tag : 0; }
         std::uint32_t shard_id() const noexcept { return hdr_ ? hdr_->shard_id : 0; }
 
@@ -390,6 +437,7 @@ namespace frameworkcpp::arena
         friend class arena_bucket;
 
         std::byte *bytes() const noexcept { return reinterpret_cast<std::byte *>(hdr_); }
+        std::byte *slice_end() const noexcept { return bytes() + hdr_->slice_bytes; }
 
         detail::bucket_descriptor *buckets() noexcept
         {
@@ -403,21 +451,17 @@ namespace frameworkcpp::arena
 
         std::byte *take_block(std::uint32_t bucket)
         {
-            auto &d = buckets()[bucket];
-            return take_block_desc(&d);
-        }
-
-        std::byte *take_block_desc(detail::bucket_descriptor *desc)
-        {
-            const auto idx = detail::alloc_block(bytes(), *desc);
+            auto *d = &buckets()[bucket];
+            const auto idx = detail::alloc_block(bytes(), *d);
             if (idx < 0)
                 return nullptr;
-            auto *b = detail::block_base(bytes(), *desc, idx);
+            detail::note_alloc(*d);
+            auto *b = detail::block_base(bytes(), *d, idx);
             detail::block_header hdr;
-            hdr.bucket = static_cast<std::uint32_t>(desc - buckets());
+            hdr.bucket = bucket;
             hdr.shard = hdr_->shard_id;
             __builtin_memcpy(b, &hdr, sizeof(hdr));
-            auto *payload = detail::payload_of(b, *desc);
+            auto *payload = detail::payload_of(b, *d);
             detail::store_anchor(payload, b);
             return payload;
         }
@@ -439,7 +483,7 @@ namespace frameworkcpp::arena
         {
             if (!desc_ || count * sizeof(T) > desc_->object_size || alignof(T) > desc_->align)
                 return nullptr;
-            return reinterpret_cast<T *>(shard_.take_block_desc(desc_));
+            return reinterpret_cast<T *>(take_block_desc(desc_));
         }
 
         template <typename T>
@@ -454,6 +498,7 @@ namespace frameworkcpp::arena
                 return;
             auto *b = detail::block_of_payload(static_cast<std::byte *>(p));
             const auto index = (b - detail::run_base(shard_.bytes(), *desc_)) / desc_->stride;
+            detail::note_free(*desc_);
             detail::free_block(shard_.bytes(), *desc_, index);
         }
 
@@ -462,6 +507,22 @@ namespace frameworkcpp::arena
     private:
         friend class arena_shard_t;
         arena_bucket(arena_shard_t shard, detail::bucket_descriptor *desc) : shard_(shard), desc_(desc) {}
+
+        std::byte *take_block_desc(detail::bucket_descriptor *desc)
+        {
+            const auto idx = detail::alloc_block(shard_.bytes(), *desc);
+            if (idx < 0)
+                return nullptr;
+            detail::note_alloc(*desc);
+            auto *b = detail::block_base(shard_.bytes(), *desc, idx);
+            detail::block_header hdr;
+            hdr.bucket = static_cast<std::uint32_t>(desc - shard_.buckets());
+            hdr.shard = shard_.hdr_->shard_id;
+            __builtin_memcpy(b, &hdr, sizeof(hdr));
+            auto *payload = detail::payload_of(b, *desc);
+            detail::store_anchor(payload, b);
+            return payload;
+        }
 
         arena_shard_t shard_;
         detail::bucket_descriptor *desc_ = nullptr;
@@ -481,8 +542,10 @@ namespace frameworkcpp::arena
         void deallocate_bytes(void *p) noexcept;
         void deallocate(void *p) noexcept { deallocate_bytes(p); }
 
+        std::size_t shard_count() const noexcept;
         std::size_t capacity() const noexcept;
         std::size_t used() const noexcept;
+        std::size_t live() const noexcept;
 
     private:
         friend class arena_shard_t;
@@ -542,7 +605,7 @@ namespace frameworkcpp::arena
                 return &r;
         }
         detail::region r;
-        const auto grow = bytes > config_.size ? bytes : config_.size;
+        const auto grow = detail::align_up(bytes > config_.size ? bytes : config_.size, detail::kPageSize);
         if (!r.reserve(grow, config_.touch_pages))
             return nullptr;
         regions_.push_back(std::move(r));
@@ -560,6 +623,11 @@ namespace frameworkcpp::arena
         arena_shard_t view;
         if (specs.empty())
             return view;
+        for (const auto &s : specs)
+        {
+            if (!detail::spec_valid(s))
+                return view;
+        }
         const auto bytes = detail::slice_bytes_runtime(specs);
         auto *region = region_for(bytes);
         if (region == nullptr)
@@ -576,6 +644,7 @@ namespace frameworkcpp::arena
         hdr->tag = tag;
         hdr->shard_id = next_shard_id_;
         hdr->bucket_count = static_cast<std::uint32_t>(specs.size());
+        hdr->slice_bytes = bytes;
 
         auto *descs = reinterpret_cast<detail::bucket_descriptor *>(hdr + 1);
         std::size_t offset = detail::align_up(reinterpret_cast<std::byte *>(descs) - slice, 8)
@@ -597,6 +666,8 @@ namespace frameworkcpp::arena
             d.c = 0;
             d.ring_off = 0;
             d.seq_off = 0;
+            d.in_use = 0;
+            d.freed = 0;
         }
 
         offset = detail::align_up(offset, alignof(std::shared_mutex));
@@ -657,20 +728,37 @@ namespace frameworkcpp::arena
     {
         if (p == nullptr)
             return;
-        auto *b = detail::block_of_payload(static_cast<std::byte *>(p));
+        auto *payload = static_cast<std::byte *>(p);
+        std::lock_guard lock{registry_mutex_};
+        detail::region *owner = nullptr;
+        for (auto &r : regions_)
+        {
+            if (payload >= r.base() && payload < r.base() + r.bytes())
+            {
+                owner = &r;
+                break;
+            }
+        }
+        if (owner == nullptr)
+            return;
+        auto *b = detail::block_of_payload(payload);
+        if (b < owner->base() || b >= owner->base() + owner->bytes())
+            return;
         detail::block_header hdr;
         __builtin_memcpy(&hdr, b, sizeof(hdr));
-        std::lock_guard lock{registry_mutex_};
         if (hdr.shard >= shards_.size())
             return;
         auto &entry = shards_[hdr.shard];
-        auto *slice = regions_[entry.first].base() + entry.second;
+        if (entry.first >= regions_.size() || owner != &regions_[entry.first])
+            return;
+        auto *slice = owner->base() + entry.second;
         auto *shard_hdr = reinterpret_cast<detail::shard_header *>(slice);
         if (hdr.bucket >= shard_hdr->bucket_count)
             return;
-        auto &d = reinterpret_cast<detail::bucket_descriptor *>(shard_hdr + 1)[hdr.bucket];
-        const auto index = (b - detail::run_base(slice, d)) / d.stride;
-        detail::free_block(slice, d, index);
+        auto &db = reinterpret_cast<detail::bucket_descriptor *>(shard_hdr + 1)[hdr.bucket];
+        const auto index = (b - detail::run_base(slice, db)) / db.stride;
+        detail::note_free(db);
+        detail::free_block(slice, db, index);
     }
 
     inline void arena_shard_t::deallocate_bytes(void *p) noexcept
@@ -678,7 +766,14 @@ namespace frameworkcpp::arena
         if (hdr_ == nullptr || p == nullptr)
             return;
         auto *payload = static_cast<std::byte *>(p);
+        if (payload < bytes() || payload >= slice_end())
+        {
+            arena_->deallocate_bytes(p);
+            return;
+        }
         auto *b = detail::block_of_payload(payload);
+        if (b < bytes() || b >= slice_end())
+            return;
         detail::block_header hdr;
         __builtin_memcpy(&hdr, b, sizeof(hdr));
         if (hdr.shard != hdr_->shard_id)
@@ -687,10 +782,40 @@ namespace frameworkcpp::arena
             return;
         }
         if (hdr.bucket >= hdr_->bucket_count)
-            std::abort();
+            return;
         auto &d = buckets()[hdr.bucket];
         const auto index = (b - detail::run_base(bytes(), d)) / d.stride;
+        detail::note_free(d);
         detail::free_block(bytes(), d, index);
+    }
+
+    inline bucket_stats arena_shard_t::stats(std::uint32_t index) const noexcept
+    {
+        if (!hdr_ || index >= hdr_->bucket_count)
+            return bucket_stats{};
+        const auto &d = buckets()[index];
+        bucket_stats out;
+        out.tag = d.tag;
+        out.object_size = d.object_size;
+        out.align = d.align;
+        out.capacity = d.count;
+        if (static_cast<concurrency_model>(d.model) == concurrency_model::single_thread)
+        {
+            out.in_use = d.in_use;
+            out.freed = d.freed;
+        }
+        else
+        {
+            out.in_use = std::atomic_ref<const std::int64_t>(d.in_use).load(std::memory_order_relaxed);
+            out.freed = std::atomic_ref<const std::int64_t>(d.freed).load(std::memory_order_relaxed);
+        }
+        return out;
+    }
+
+    inline std::size_t arena_t::shard_count() const noexcept
+    {
+        std::lock_guard lock{registry_mutex_};
+        return shards_.size();
     }
 
     inline std::size_t arena_t::capacity() const noexcept
@@ -709,10 +834,36 @@ namespace frameworkcpp::arena
         return total;
     }
 
+    inline std::size_t arena_t::live() const noexcept
+    {
+        std::lock_guard lock{registry_mutex_};
+        std::size_t total = 0;
+        for (const auto &[region_index, slice_offset] : shards_)
+        {
+            auto *slice = regions_[region_index].base() + slice_offset;
+            auto *shard_hdr = reinterpret_cast<detail::shard_header *>(slice);
+            auto *descs = reinterpret_cast<detail::bucket_descriptor *>(shard_hdr + 1);
+            for (std::uint32_t i = 0; i < shard_hdr->bucket_count; ++i)
+            {
+                auto &d = descs[i];
+                if (static_cast<concurrency_model>(d.model) == concurrency_model::single_thread)
+                    total += static_cast<std::size_t>(d.in_use);
+                else
+                    total += static_cast<std::size_t>(std::atomic_ref<const std::int64_t>(d.in_use).load(std::memory_order_relaxed));
+            }
+        }
+        return total;
+    }
+
     template <std::size_t N>
     inline constexpr std::size_t shard_footprint(const object_spec (&specs)[N])
     {
         return detail::slice_bytes_c(specs);
+    }
+
+    inline constexpr std::size_t round_to_page(std::size_t bytes)
+    {
+        return (bytes + detail::kPageSize - 1) & ~(detail::kPageSize - 1);
     }
 
     inline constexpr bool valid_footprint(std::size_t bytes)
