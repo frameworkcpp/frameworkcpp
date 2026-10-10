@@ -55,6 +55,14 @@ void operator delete[](void *p) noexcept {
     // NOLINTNEXTLINE(cppcoreguidelines-no-malloc) -- counting hook mirrors operator new[]
     std::free(p);
 }
+void operator delete(void *p, [[maybe_unused]] std::size_t size) noexcept {
+    // NOLINTNEXTLINE(cppcoreguidelines-no-malloc) -- counting hook mirrors operator new
+    std::free(p);
+}
+void operator delete[](void *p, [[maybe_unused]] std::size_t size) noexcept {
+    // NOLINTNEXTLINE(cppcoreguidelines-no-malloc) -- counting hook mirrors operator new[]
+    std::free(p);
+}
 #endif
 
 namespace frameworkcpp::environment::test {
@@ -66,7 +74,7 @@ TEST(EnvironmentHeap, InitAndOpsAreHeapFree) {
     arena_config.size = 8 * 1024 * 1024;
     arena::arena_t arena{arena_config};
 
-    environment_config_t config;
+    const environment_config_t config;
     init(arena, nullptr, config);
 
     ASSERT_EQ(get_env("FC_HEAP_MISSING", "fallback"), "fallback");

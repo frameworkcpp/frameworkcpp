@@ -40,7 +40,7 @@ jobs:
             --config-file=.clang-tidy \
             '-warnings-as-errors=*' \
             --header-filter='include/frameworkcpp/.*' \
-            tests/arena_test.cpp tests/arena_ptr_test.cpp tests/arena_allocator_test.cpp tests/version_test.cpp
+            tests/*.cpp
 
   # One job per (architecture, build type). Every job runs inside an Ubuntu
   # container of the target architecture, emulated via QEMU (binfmt) for the

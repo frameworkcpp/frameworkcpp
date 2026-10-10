@@ -59,6 +59,14 @@ void operator delete[](void *p) noexcept {
     // NOLINTNEXTLINE(cppcoreguidelines-no-malloc) -- counting hook mirrors operator new[]
     std::free(p);
 }
+void operator delete(void *p, [[maybe_unused]] std::size_t size) noexcept {
+    // NOLINTNEXTLINE(cppcoreguidelines-no-malloc) -- counting hook mirrors operator new
+    std::free(p);
+}
+void operator delete[](void *p, [[maybe_unused]] std::size_t size) noexcept {
+    // NOLINTNEXTLINE(cppcoreguidelines-no-malloc) -- counting hook mirrors operator new[]
+    std::free(p);
+}
 
 namespace frameworkcpp::arena::test {
 #endif
