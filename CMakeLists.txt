@@ -92,6 +92,48 @@ if(FRAMEWORKCPP_BUILD_TESTING)
     target_link_libraries(frameworkcpp_arena_allocator_test PRIVATE frameworkcpp GTest::gtest_main)
     target_compile_features(frameworkcpp_arena_allocator_test PRIVATE cxx_std_20)
     gtest_discover_tests(frameworkcpp_arena_allocator_test)
+
+    option(FRAMEWORKCPP_ENABLE_CLANG_TIDY "Run clang-tidy on the framework's translation units" OFF)
+    if(FRAMEWORKCPP_ENABLE_CLANG_TIDY)
+        find_program(_frameworkcpp_clang_tidy NAMES clang-tidy clang-tidy-19)
+        if(_frameworkcpp_clang_tidy)
+            set_target_properties(
+                frameworkcpp_version_test
+                frameworkcpp_arena_test
+                frameworkcpp_arena_ptr_test
+                frameworkcpp_arena_allocator_test
+                PROPERTIES CXX_CLANG_TIDY "${_frameworkcpp_clang_tidy}"
+            )
+        else()
+            message(WARNING "FRAMEWORKCPP_ENABLE_CLANG_TIDY=ON but clang-tidy was not found")
+        endif()
+    endif()
+endif()
+
+# --- Lint -------------------------------------------------------------------
+find_program(_frameworkcpp_clang_format NAMES clang-format clang-format-19)
+if(_frameworkcpp_clang_format)
+    file(GLOB_RECURSE _frameworkcpp_format_headers CONFIGURE_DEPENDS
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/frameworkcpp/*.hpp)
+    set(_frameworkcpp_format_sources ${_frameworkcpp_format_headers})
+    if(FRAMEWORKCPP_BUILD_TESTING)
+        file(GLOB_RECURSE _frameworkcpp_format_tests CONFIGURE_DEPENDS
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cpp)
+        list(APPEND _frameworkcpp_format_sources ${_frameworkcpp_format_tests})
+    endif()
+
+    if(NOT TARGET format)
+        add_custom_target(format
+            COMMAND ${_frameworkcpp_clang_format} -i ${_frameworkcpp_format_sources}
+            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+            COMMENT "Applying clang-format to framework sources"
+        )
+        add_custom_target(format-check
+            COMMAND ${_frameworkcpp_clang_format} --dry-run --Werror ${_frameworkcpp_format_sources}
+            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+            COMMENT "Checking clang-format compliance"
+        )
+    endif()
 endif()
 
 # --- CPack -------------------------------------------------------------------

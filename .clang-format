@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# clang-format policy for FrameworkCpp.
+
+BasedOnStyle: LLVM
+Language: Cpp
+Standard: c++20
+
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 100
+
+BreakBeforeBraces: Attach
+AllowShortIfStatementsOnASingleLine: false
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortLambdasOnASingleLine: Inline
+AllowShortLoopsOnASingleLine: false
+
+BinPackArguments: false
+BinPackParameters: false
+AlignAfterOpenBracket: Align
+
+PointerAlignment: Right
+ReferenceAlignment: Right
+SpaceAfterCStyleCast: true
+
+NamespaceIndentation: None
+MaxEmptyLinesToKeep: 1
+SortIncludes: true
+
+FixNamespaceComments: false

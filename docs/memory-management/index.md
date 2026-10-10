@@ -3,60 +3,65 @@
 Real-time systems cannot afford a `malloc` here and there, a lock under
 contention, or memory that appears and disappears without a plan.
 `frameworkcpp::arena` is the framework's answer: all blocks come from
-pre-reserved `mmap` segments, freed blocks are recycled back into the arena,
-and the fast paths never take a lock. The whole module is header-only.
+pre-reserved `mmap` segments, freed blocks are recycled into the arena, and the
+fast paths never take a lock. The whole module is header-only.
 
-## The idea
+## The vocabulary
 
-An arena starts as one or more raw memory segments. You carve **shards** out of
-them — each shard is a private, contiguous slice that only it sees — and inside
-a shard you declare **buckets**: runs of same-size blocks with their own
-free-list.
+Four words explain the entire module:
+
+| Concept | What it is |
+| --- | --- |
+| **Arena** | The owner of all the memory. It reserves one or more `mmap` segments and carves shards out of them. The arena knows the budget. |
+| **Shard** | A contiguous slice of the arena's memory, identified by a tag. Only the slices' contents belong to the shard. |
+| **Bucket** | A pool of same-size slots inside a shard, identified by a tag. All its slots share one size and one alignment. |
+| **Slot** | One block of memory inside a bucket. Allocating hands you a slot; freeing returns it. |
 
 ```
 mmap ─► [ region 0 ][ region 1 (only if it grows) ]...
             └─ [ shard A ][ shard B ][ ... ]          every shard = one slice
-                   └─ bucket(tag, size, align, count) = block run + free-list
+                   └─ [ bucket: many slots of the same size ]
 ```
 
-- Creating a shard carves a slice from the arena and returns a view to it.
-  Slices are kept 64-byte aligned, so high-alignment buckets stay correct no
-  matter how many shards came before.
-- If a new shard does not fit, the arena reserves one more `mmap`. That is the
-  only system call the module makes at runtime.
-- Freeing a block returns it to its bucket for **reuse**. Nothing goes back to
-  the operating system until the arena is destroyed.
+## The mental model
+
+1. You create an **arena** and tell it your budget (or let it grow).
+2. You **carve shards** out of it with `create_shard(tag, specs)`. Each shard
+   gets its own slice of memory — 64-byte aligned, so high-alignment buckets
+   stay correct no matter what came before.
+3. Inside a shard you declare **buckets** — pools of same-size slots — with
+   `object_spec_t` entries.
+4. You allocate **slots** from buckets; when you free a slot it goes back to
+   its bucket for reuse. Nothing is returned to the OS until the arena dies.
 
 ## Concurrency
 
-Whether a shard is safe to share is a decision you make per bucket. When you
-create a writer or reader handle for a bucket, you pick the concurrency model:
+Whether a bucket is safe to share is a decision you make per bucket. When you
+ask for a bucket handle you pick the concurrency model:
 
-| Model | What it means |
-| --- | --- |
-| Single-thread | No mutex, no atomics. One thread owns the bucket end to end — the fastest path. |
-| Lock-free | Atomics and a lock-free ring; several threads can allocate and free the same bucket without locks. |
-| Thread-safe | A shared mutex guards the bucket; safe from anywhere without thinking. |
+| Model | What it means | Cost |
+| --- | --- | --- |
+| Single-thread | One thread owns the bucket end to end. | nothing — plain fields |
+| Lock-free | Several threads allocate/free the bucket without locks. | atomics only |
+| Thread-safe | Safe from anywhere without thinking. | a shared mutex |
 
-The model is fixed the first time the bucket is used. Asking for a different one
-later aborts the program.
+The model is fixed the first time the bucket is used. Asking for a different
+one later aborts the program.
 
-## What you get
+## The budget
 
-- Raw, uninitialized allocation that is free on the single-thread path, with
-  blocks aligned exactly as the bucket declares.
-- Safe deallocation: the arena verifies a pointer really belongs to it before
-  touching anything, so foreign pointers are harmless no-ops.
-- Per-bucket counters so you can observe churn.
-- Compile-time footprints, so an arena can be sized to the exact byte.
+An arena can be capped. You set a **soft limit** (a warning watermark) and a
+**hard limit** (the hard ceiling). Growing past the soft limit warns; growing
+past the hard limit throws `arena_overflow_error` (or aborts, if you configure
+it). See [Configuration](configuration) for the details.
 
 ## The pieces
 
-- [The Arena](arena-t) — owns the memory, carves shards, sizes the budget.
-- [Shards](arena-shard-t) — the shard view; where allocation and reuse happen.
-- [Buckets](arena-bucket) — a handle bound to one bucket.
-- [Smart Pointers](smart-pointers) — owning and shared pointers that return
-  memory to the arena on their own.
-- [Allocators & std::pmr](allocator) — the standard allocator bridge for
-  `std::vector` and PMR containers.
+Read them top to bottom — each page builds on the previous one:
+
+- [The Arena](arena-t) — owns the memory, your budget, and how to carve shards.
+- [Shards](arena-shard-t) — the slices and how allocation finds the right bucket.
+- [Buckets](arena-bucket) — the pools of same-size slots and how to grab one directly.
+- [Smart Pointers](smart-pointers) — owning and shared pointers that return memory on their own.
+- [Allocators & std::pmr](allocator) — the standard allocator bridge for `std::vector`.
 - [Configuration](configuration) — the knobs and the compile-time footprints.

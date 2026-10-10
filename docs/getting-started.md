@@ -65,7 +65,10 @@ target_link_libraries(app PRIVATE frameworkcpp::frameworkcpp)
 int main()
 {
     frameworkcpp::arena::arena_t arena;
-    auto shard = arena.create_shard(1, {{0, sizeof(int), alignof(int), 64}});
+    // create a shard (tag 1) holding one bucket (tag 0): 64 slots of int.
+    auto shard = arena.create_shard(
+        1,
+        {{0, sizeof(int), alignof(int), 64}});
     auto *p = shard.allocate<int>();
     shard.deallocate(p);
 }
