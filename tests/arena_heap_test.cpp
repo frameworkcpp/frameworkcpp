@@ -15,9 +15,20 @@ std::atomic<std::uint64_t> g_allocations{0};
 
 } // namespace
 
-#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__) ||                               \
-    (defined(__clang__) && (defined(__has_feature) && (__has_feature(address_sanitizer) ||         \
-                                                       __has_feature(thread_sanitizer))))
+// Detect sanitizer builds without touching __has_feature when the compiler
+// does not provide it (GCC would fail on __has_feature(...) as an undefined
+// function-like macro).
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+#define FRAMEWORKCPP_SANITIZED 1
+#elif defined(__clang__)
+#if defined(__has_feature)
+#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
+#define FRAMEWORKCPP_SANITIZED 1
+#endif
+#endif
+#endif
+
+#if defined(FRAMEWORKCPP_SANITIZED)
 namespace frameworkcpp::arena::test {
 #else
 // Count every heap allocation in this TU so the arena can prove it never
