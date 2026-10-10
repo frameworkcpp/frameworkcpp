@@ -27,9 +27,22 @@ jobs:
         arch: [amd64, arm64, armv7, ppc64le, riscv64, s390x]
         config: [debug, asan, tsan, ubsan, release]
         exclude:
-          # ThreadSanitizer requires a 64-bit target.
+          # ThreadSanitizer needs 64-bit targets.
           - arch: armv7
             config: tsan
+          # ASAN and TSAN runtimes do not work under QEMU emulation.
+          - arch: ppc64le
+            config: tsan
+          - arch: s390x
+            config: tsan
+          - arch: armv7
+            config: asan
+          - arch: ppc64le
+            config: asan
+          - arch: riscv64
+            config: asan
+          - arch: s390x
+            config: asan
     steps:
       - name: Checkout
         uses: actions/checkout@v4
