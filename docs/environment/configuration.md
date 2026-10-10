@@ -11,7 +11,8 @@ struct environment_config_t {
     std::size_t max_keys        = 256;   // distinct keys
     std::size_t max_key_len     = 256;   // longest key, in bytes
     std::size_t max_value_len   = 4096;  // longest value, in bytes
-    std::size_t max_updates     = 256;   // total set_env calls
+    std::size_t value_cells     = 1024;  // recyclable value cells (live + in-flight)
+    std::size_t journal_size    = 256;   // delta ring length (power of two)
     std::size_t max_threads     = 64;    // concurrent per-thread views
     bool        read_process_env = true; // inherit the process environment
 };
@@ -22,28 +23,29 @@ struct environment_config_t {
 | `max_keys` | Number of distinct keys. | The whole process environment counts; a host easily has 50–100 vars. |
 | `max_key_len` | Longest key, in bytes. | `set_env` rejects longer keys. |
 | `max_value_len` | Longest value, in bytes. | `set_env` rejects longer values; `PATH` can be long. |
-| `max_updates` | Total `set_env` calls for the store's lifetime. | Each write consumes one immutable value cell — it is a budget, not a window. |
+| `value_cells` | Value cells in the pool. | Values are recycled, so this is memory, not a write count. |
+| `journal_size` | Updates in the delta ring. | A reader this far behind reseeds instead of replaying. |
 | `max_threads` | Per-thread views. | Extra threads still read, just without a private cache. |
 | `read_process_env` | Whether `init` inherits the process environment. | Set `false` for a file-only, deterministic store. |
 
 All fields have sensible defaults, so `init(arena, path)` works with no config
-at all. Tighten them for real-time: known, fixed capacities turn an eventual
-overflow into a loud `false` from `set_env` instead of a surprise.
+at all.
 
-## Update budget, not a cache
+## Unbounded updates, bounded memory
 
-Because values are immutable and never reclaimed, every `set_env` permanently
-consumes one cell. `max_updates` is therefore the **number of writes the store
-will ever accept**:
+Values are immutable and recycled. A `set_env` retires the previous cell for the
+key; the cell is reused once every live view has moved past the update that
+retired it. So the number of writes is **not** a budget — only the memory is:
 
-```cpp
-environment_config_t config;
-config.max_updates = 4096;   // room for 4096 publishes over the process lifetime
-```
+- `value_cells` must hold the keys you have plus the cells retired but not yet
+  recycled. In steady state that is small: a handful of updates in flight.
+- `journal_size` is how far behind a reader may drift before it reseeds from the
+  global slots instead of replaying the delta ring.
 
-If your workload writes configuration indefinitely, either raise the budget to
-cover the process lifetime or reload the module (a fresh `init` after
-`shutdown`) when you want a new window.
+A writer only fails when the pool is momentarily exhausted — which happens when
+a live view stops advancing and pins every retired cell. That is the bounded
+back-pressure, and it clears as soon as the lagging view reads again or its
+thread exits.
 
 ## Sizing the arena
 
@@ -84,8 +86,8 @@ environment::init(arena, ".env");
 ```cpp
 environment_config_t config;
 config.read_process_env = false;
-config.max_keys   = 128;
-config.max_updates = 1024;
+config.max_keys = 128;
+config.value_cells = 256;
 environment::init(arena, "/etc/myapp/app.env", config);
 ```
 
@@ -98,55 +100,34 @@ config.max_threads = 512;
 environment::init(arena, "app.env", config);
 ```
 
-## Observing the budget
+## Observing the store
 
-The store reports success rather than throwing, so the cheapest way to know you
-sized it right is to check the return of your writes:
-
-```cpp
-if (!environment::set_env("TUNING", value)) {
-    // max_updates, max_keys or a length limit was reached
-}
-```
-
-## When the updates fill up
-
-`max_updates` is a lifetime budget: every `set_env` publishes a new immutable
-cell and nothing is ever reclaimed, so once the budget is spent, `set_env`
-returns `false` — loudly and reproducibly, never by allocating behind your back.
-`environment_stats()` tells you how close you are *before* that happens:
+`set_env` reports success rather than throwing, and `environment_stats()` shows
+the live picture — including how many retired cells are still pinned:
 
 ```cpp
 struct environment_stats_t {
-    std::size_t keys_used;
-    std::size_t max_keys;
-    std::size_t updates_used;
-    std::size_t max_updates;
-    std::size_t key_room()    const;   // max_keys - keys_used
-    std::size_t update_room() const;   // max_updates - updates_used
+    std::size_t   keys_used;        // distinct keys present
+    std::size_t   max_keys;
+    std::uint64_t total_updates;    // writes committed so far (monotonic)
+    std::size_t   journal_size;
+    std::size_t   retired_pending;  // retired cells waiting to be recycled
 };
 
 auto stats = environment::environment_stats();
-if (stats.update_room() < 16) {
-    // plan a reload, or log a warning, before writes start failing
+if (stats.retired_pending + 16 > config.value_cells) {
+    // a view is lagging; likely a thread that stopped reading
 }
 ```
 
-When the budget is genuinely full you have three options:
+A healthy store keeps `retired_pending` near zero. A number that climbs and
+stays high means some live view is not advancing (a thread that reads once and
+then idles); once that thread reads again or exits, the reclaimer drains it.
 
-1. **Size for the lifetime.** Environment variables change rarely — a config
-   reload here and there — so `max_updates` in the thousands is usually
-   permanent. Because the budget is `constexpr`, you pay for it once in the
-   arena size and never think about it again.
-2. **Reload at a quiescent point.** `shutdown()` then `init()` with a fresh
-   arena gives you a brand-new store. Do it only when no reader or writer is
-   running (`init`/`shutdown` are single-threaded), the same discipline as
-   startup. The old shard is returned when its arena is destroyed.
-3. **Fail loudly.** Treat `set_env == false` as back-pressure: log it, keep the
-   previous value and retry on the next reload window.
+## If a write ever fails
 
-What you cannot do — by design — is reclaim a cell while a reader might still
-hold it. Values are immutable and never edited in place, so a cheap read never
-needs a lock. Reclaiming them safely would require epoch-based reclamation
-(RCU), which is deliberately left out of this version; the fixed budget is the
-price of the lock-free, heap-free read path.
+`set_env` returns `false` only for bad input, a full key space, or a value pool
+momentarily pinned by lagging readers. Values are recycled, so this is not a
+lifetime budget — it is transient back-pressure that clears when the lagging
+views move on. There is no need to reload the module; if a long-lived thread
+reads rarely, either let it read periodically or give the pool more cells.

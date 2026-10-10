@@ -66,18 +66,49 @@ TEST_F(EnvironmentTest, SetEnvOverridesAndCreates) {
     EXPECT_EQ(get_env("FC_NEW", "default"), "two");
 }
 
-TEST_F(EnvironmentTest, ExhaustsUpdates) {
+TEST_F(EnvironmentTest, RecyclesCellsWhileAReaderPinsThem) {
     environment_config_t config;
-    config.max_keys = 8;
-    config.max_updates = 3;
     config.read_process_env = false;
+    config.max_keys = 8;
+    config.value_cells = 2; // tiny pool: max_keys + value_cells == 10 cells total
+    config.journal_size = 8;
+    config.max_threads = 4;
     auto arena = make_arena();
     init(arena, nullptr, config);
-    EXPECT_TRUE(set_env("FC_A", "1"));
-    EXPECT_TRUE(set_env("FC_B", "2"));
-    EXPECT_TRUE(set_env("FC_C", "3"));
-    EXPECT_FALSE(set_env("FC_D", "4"));
-    EXPECT_EQ(get_env("FC_C", ""), "3");
+    ASSERT_TRUE(set_env("FC_R", "seed"));
+
+    std::atomic<bool> pinned{false};
+    std::atomic<bool> release{false};
+    std::thread pinner([&] {
+        (void) get_env("FC_R", ""); // creates a view at the current version, then idles
+        pinned.store(true, std::memory_order_release);
+        while (!release.load(std::memory_order_acquire))
+            std::this_thread::yield();
+        (void) get_env("FC_R", ""); // advances the view, unpinning retired cells
+    });
+    while (!pinned.load(std::memory_order_acquire))
+        std::this_thread::yield();
+
+    // A reader stuck at the initial version pins every retired cell, so the
+    // value pool drains and writes eventually fail — the bounded back-pressure.
+    int successes = 0;
+    bool exhausted = false;
+    for (int i = 0; i < 1000; ++i) {
+        if (set_env("FC_R", std::to_string(i)))
+            ++successes;
+        else {
+            exhausted = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(exhausted);
+    EXPECT_GT(successes, 0);
+
+    // Once the pinner advances and exits, retired cells are recycled.
+    release.store(true, std::memory_order_release);
+    pinner.join();
+    EXPECT_TRUE(set_env("FC_R", "after"));
+    EXPECT_EQ(get_env("FC_R", ""), "after");
 }
 
 TEST_F(EnvironmentTest, ExhaustsKeys) {
@@ -117,7 +148,8 @@ TEST_F(EnvironmentTest, ThreadsSeeTheirOwnWrite) {
 
 TEST_F(EnvironmentTest, ConcurrentReadersStayCoherent) {
     environment_config_t config;
-    config.max_updates = 2048;
+    config.value_cells = 256;
+    config.journal_size = 64;
     config.max_threads = 32;
     auto arena = make_arena();
     init(arena, nullptr, config);
@@ -136,13 +168,17 @@ TEST_F(EnvironmentTest, ConcurrentReadersStayCoherent) {
             }
         });
     }
-    for (int i = 1; i <= 500; ++i)
-        set_env("FC_HOT", "value-" + std::to_string(i));
+    std::string last = "value-0";
+    for (int i = 1; i <= 3000; ++i) {
+        const std::string candidate = "value-" + std::to_string(i);
+        if (set_env("FC_HOT", candidate))
+            last = candidate;
+    }
     stop.store(true, std::memory_order_relaxed);
     for (auto &reader : readers)
         reader.join();
     EXPECT_EQ(bad.load(), 0);
-    EXPECT_EQ(get_env("FC_HOT", ""), "value-500");
+    EXPECT_EQ(get_env("FC_HOT", ""), last);
 }
 
 TEST_F(EnvironmentTest, NotInitializedFallsBack) {
@@ -159,7 +195,7 @@ TEST_F(EnvironmentTest, BudgetIsConstexpr) {
     static_assert(budget >= footprint, "the arena budget must cover the footprint");
     static_assert(budget % 4096 == 0, "the arena budget must be page aligned");
 
-    constexpr environment_config_t small{.max_keys = 8, .max_updates = 8, .max_threads = 2};
+    constexpr environment_config_t small{.max_keys = 8, .value_cells = 8, .max_threads = 2};
     static_assert(environment_footprint(small) < footprint,
                   "a smaller config must have a smaller footprint");
 
@@ -177,24 +213,23 @@ TEST_F(EnvironmentTest, StatsReportUsage) {
     environment_config_t config;
     config.read_process_env = false;
     config.max_keys = 4;
-    config.max_updates = 3;
+    config.value_cells = 3;
+    config.journal_size = 8;
     auto arena = make_arena();
     init(arena, nullptr, config);
 
     auto stats = environment_stats();
     EXPECT_EQ(stats.max_keys, 4U);
-    EXPECT_EQ(stats.max_updates, 3U);
+    EXPECT_EQ(stats.journal_size, 8U);
     EXPECT_EQ(stats.keys_used, 0U);
-    EXPECT_EQ(stats.updates_used, 0U);
-    EXPECT_EQ(stats.key_room(), 4U);
-    EXPECT_EQ(stats.update_room(), 3U);
+    EXPECT_EQ(stats.total_updates, 0U);
+    EXPECT_EQ(stats.retired_pending, 0U);
 
     ASSERT_TRUE(set_env("FC_S1", "a"));
     ASSERT_TRUE(set_env("FC_S2", "b"));
     stats = environment_stats();
     EXPECT_EQ(stats.keys_used, 2U);
-    EXPECT_EQ(stats.updates_used, 2U);
-    EXPECT_EQ(stats.update_room(), 1U);
+    EXPECT_EQ(stats.total_updates, 2U);
 }
 
 } // namespace

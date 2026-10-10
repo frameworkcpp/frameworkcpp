@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <string_view>
@@ -9,7 +10,9 @@
 // Internal layout of the environment module. Every structure here is carved
 // into the module's arena shard as a fixed-capacity array; nothing is ever
 // allocated on the heap. Published cells are immutable: a set_env builds a new
-// value cell and links to it, it never edits a live one.
+// value cell and links to it, it never edits a live one. Retired cells are
+// recycled by an epoch reader (see environment.hpp): a cell is only reused once
+// every live view has moved past the version that retired it.
 namespace frameworkcpp::environment::detail {
 
 inline constexpr std::uint64_t kShardTag = 0x656e762d61726500ULL;
@@ -19,8 +22,10 @@ inline constexpr std::uint64_t kValueTag = 3;
 inline constexpr std::uint64_t kViewTag = 4;
 inline constexpr std::uint64_t kKeyTableTag = 5;
 inline constexpr std::uint64_t kGlobalTag = 6;
-inline constexpr std::uint64_t kRingTag = 7;
-inline constexpr std::size_t kSpecCount = 7;
+inline constexpr std::uint64_t kJournalTag = 7;
+inline constexpr std::uint64_t kRetireTag = 8;
+inline constexpr std::uint64_t kViewRegTag = 9;
+inline constexpr std::size_t kSpecCount = 9;
 
 inline constexpr std::size_t kNoKey = static_cast<std::size_t>(-1);
 
@@ -59,17 +64,32 @@ struct value_cell_t {
     // value bytes follow at offset sizeof(value_cell_t)
 };
 
-// One entry of the delta journal. Entries are appended in version order and
-// never rewritten, so readers can replay a suffix without tearing.
+// One slot of the delta ring. `tag` is the commit gate: a writer bumps it to
+// `version + 1` (release) once key_id/value are in place; a reader only trusts
+// a slot after reading `tag` twice around the fields, which also makes the
+// slot safe to rewrite when the ring wraps.
 struct patch_t {
-    std::uint32_t key_id;
-    std::uint32_t pad;
-    value_cell_t *value;
+    std::atomic<std::uint64_t> tag{0};
+    std::atomic<std::uint32_t> key_id{0};
+    std::atomic<value_cell_t *> value{nullptr};
 };
 
-// Per-thread cache, indexed by key-table slot id.
+// A retired value cell waiting to be recycled. `retired_version` is the update
+// that superseded it; the cell may be reused once every live view has moved
+// past that version.
+struct retired_t {
+    value_cell_t *cell;
+    std::uint64_t retired_version;
+};
+
+// Per-thread cache, indexed by key-table slot id. `published` and `active` are
+// touched from other threads (the reclaimer) through std::atomic_ref; the rest
+// is thread-private.
 struct view_t {
     std::uint64_t my_version;
+    std::uint64_t published;
+    std::uint32_t active;
+    std::uint32_t pad;
     value_cell_t *cached[1];
 };
 

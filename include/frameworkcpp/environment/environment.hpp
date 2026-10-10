@@ -4,11 +4,18 @@
 
 // A dotenv-style environment store backed entirely by an arena shard. Values
 // live in immutable arena cells; readers keep a per-thread view and catch up
-// through a bounded, append-only patch journal, so a warmed-up get_env never
-// touches a shared atomic beyond the single global version counter.
+// through a bounded delta ring, so a warmed-up get_env never touches a shared
+// atomic beyond the single global version counter.
+//
+// Updates are unbounded while memory stays fixed: a superseded cell is retired
+// and later recycled once every live view has moved past the update that
+// retired it (epoch-based reclamation). A get_env result is valid until the
+// next get_env/set_env on the same thread, and the arena must outlive the
+// module.
 //
 // include: #include <frameworkcpp/environment/environment.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -33,16 +40,25 @@ namespace detail {
 
 struct control_t {
     arena::arena_shard_t shard;
-    std::atomic<key_cell_t *> *key_table;
-    std::atomic<value_cell_t *> *global;
-    patch_t *journal;
+    std::atomic<key_cell_t *> *key_table; // [slots]
+    std::atomic<value_cell_t *> *global;  // [slots]
+    patch_t *journal;                     // [journal_size]
+    retired_t *retired;                   // [retire_capacity], ring
+    view_t **views;                       // [max_threads], pre-allocated
     std::atomic<std::uint64_t> version;
+    std::atomic<std::size_t> next_view;
+    std::atomic<std::size_t> retire_head;
+    std::atomic<std::size_t> retire_tail;
     std::size_t slots;
     std::size_t slot_mask;
+    std::size_t journal_size;
+    std::size_t journal_mask;
+    std::size_t retire_capacity;
+    std::size_t retire_mask;
     std::size_t max_keys;
     std::size_t max_key_len;
     std::size_t max_value_len;
-    std::size_t max_updates;
+    std::size_t max_threads;
     std::mutex writer;
 };
 
@@ -60,15 +76,17 @@ inline std::atomic<std::uint64_t> &epoch_ref() noexcept {
 
 constexpr void make_specs(const environment_config_t &config,
                           arena::object_spec_t (&specs)[kSpecCount],
-                          std::size_t &slots) {
+                          std::size_t &slots,
+                          std::size_t &retire_capacity) {
     slots = next_pow2(config.max_keys * 2);
+    retire_capacity = next_pow2(config.max_keys + config.value_cells);
     specs[0] = {kControlTag, sizeof(control_t), alignof(control_t), 1};
     specs[1] = {
         kKeyTag, key_object_bytes(config.max_key_len), alignof(std::uint64_t), config.max_keys};
     specs[2] = {kValueTag,
                 value_object_bytes(config.max_value_len),
                 alignof(std::uint64_t),
-                config.max_keys + config.max_updates};
+                config.max_keys + config.value_cells};
     specs[3] = {kViewTag, view_object_bytes(slots), alignof(std::uint64_t), config.max_threads};
     specs[4] = {kKeyTableTag,
                 slots * sizeof(std::atomic<key_cell_t *>),
@@ -78,7 +96,9 @@ constexpr void make_specs(const environment_config_t &config,
                 slots * sizeof(std::atomic<value_cell_t *>),
                 alignof(std::atomic<value_cell_t *>),
                 1};
-    specs[6] = {kRingTag, config.max_updates * sizeof(patch_t), alignof(patch_t), 1};
+    specs[6] = {kJournalTag, config.journal_size * sizeof(patch_t), alignof(patch_t), 1};
+    specs[7] = {kRetireTag, retire_capacity * sizeof(retired_t), alignof(retired_t), 1};
+    specs[8] = {kViewRegTag, config.max_threads * sizeof(view_t *), alignof(view_t *), 1};
 }
 
 inline std::size_t lookup(control_t *control, const char *name, std::size_t len) {
@@ -223,37 +243,108 @@ inline void load_process_env(control_t *control) {
     }
 }
 
-struct view_guard_t {
-    std::uint64_t epoch = 0;
+struct view_slot_guard {
+    view_slot_guard() = default;
+    view_slot_guard(const view_slot_guard &) = delete;
+    view_slot_guard &operator=(const view_slot_guard &) = delete;
+    view_slot_guard(view_slot_guard &&) = delete;
+    view_slot_guard &operator=(view_slot_guard &&) = delete;
+    ~view_slot_guard() {
+        if (view != nullptr && epoch == epoch_ref().load(std::memory_order_relaxed) &&
+            control_ref() != nullptr)
+            std::atomic_ref<std::uint32_t>(view->active).store(0, std::memory_order_release);
+    }
+
     view_t *view = nullptr;
+    std::uint64_t epoch = 0;
 };
 
-// One view per thread. Views are carved from the module's shard and reclaimed
-// when the arena is torn down; a thread never frees across a re-init, it just
-// drops its stale view and takes a fresh one.
+inline view_slot_guard &tls_guard() noexcept {
+    static thread_local view_slot_guard guard;
+    return guard;
+}
+
+// One pre-allocated view per thread. Views are carved once at init and handed
+// out by index; a thread never frees one, it just marks it inactive on exit so
+// the reclaimer stops waiting for it.
 inline view_t *thread_view(control_t *control) {
-    static thread_local view_guard_t guard;
+    view_slot_guard &guard = tls_guard();
     const std::uint64_t epoch = epoch_ref().load(std::memory_order_relaxed);
     if (guard.view != nullptr && guard.epoch == epoch)
         return guard.view;
     guard.view = nullptr;
     guard.epoch = epoch;
-    const auto bytes = view_object_bytes(control->slots);
-    auto *raw = control->shard.allocate_tagged(kViewTag, bytes, alignof(std::uint64_t));
-    if (raw == nullptr)
+    const std::size_t index = control->next_view.fetch_add(1, std::memory_order_relaxed);
+    if (index >= control->max_threads)
         return nullptr;
-    auto *view = reinterpret_cast<view_t *>(raw);
-    std::memset(view, 0, bytes);
+    view_t *view = control->views[index];
+    std::memset(static_cast<void *>(view->cached), 0, control->slots * sizeof(value_cell_t *));
+    view->my_version = control->version.load(std::memory_order_acquire);
+    std::atomic_ref<std::uint64_t>(view->published)
+        .store(view->my_version, std::memory_order_release);
+    std::atomic_ref<std::uint32_t>(view->active).store(1, std::memory_order_release);
     guard.view = view;
     return guard.view;
 }
 
+inline void reseed_view(control_t *control, view_t *view, std::uint64_t target) {
+    std::memset(static_cast<void *>(view->cached), 0, control->slots * sizeof(value_cell_t *));
+    view->my_version = target;
+}
+
 inline void sync_view(control_t *control, view_t *view, std::uint64_t target) {
-    for (std::uint64_t version = view->my_version; version < target; ++version) {
-        const patch_t &patch = control->journal[version];
-        view->cached[patch.key_id] = patch.value;
+    const std::uint64_t my = view->my_version;
+    if (target <= my) {
+        view->my_version = target;
+        return;
+    }
+    if (target - my >= control->journal_size) {
+        reseed_view(control, view, target);
+        return;
+    }
+    for (std::uint64_t version = my; version < target; ++version) {
+        const patch_t &patch = control->journal[version & control->journal_mask];
+        const std::uint64_t t1 = patch.tag.load(std::memory_order_acquire);
+        if (t1 != version + 1) { // slot overwritten by a newer wrap; fall back
+            reseed_view(control, view, target);
+            return;
+        }
+        const std::uint32_t key_id = patch.key_id.load(std::memory_order_relaxed);
+        value_cell_t *cell = patch.value.load(std::memory_order_relaxed);
+        if (patch.tag.load(std::memory_order_acquire) != t1) {
+            reseed_view(control, view, target);
+            return;
+        }
+        view->cached[key_id] = cell;
     }
     view->my_version = target;
+}
+
+// Recycle retired cells that no live view can still reference. Called by the
+// single writer under its mutex. A cell retired at version r is safe to reuse
+// once every active view has published a version greater than r.
+inline void reclaim(control_t *control) {
+    std::uint64_t min_version = control->version.load(std::memory_order_relaxed);
+    const std::size_t count = control->next_view.load(std::memory_order_relaxed);
+    const std::size_t limit = count < control->max_threads ? count : control->max_threads;
+    for (std::size_t i = 0; i < limit; ++i) {
+        view_t *view = control->views[i];
+        if (std::atomic_ref<std::uint32_t>(view->active).load(std::memory_order_acquire) == 0)
+            continue;
+        const std::uint64_t published =
+            std::atomic_ref<std::uint64_t>(view->published).load(std::memory_order_acquire);
+        min_version = std::min(min_version, published);
+    }
+    std::size_t head = control->retire_head.load(std::memory_order_relaxed);
+    const std::size_t tail = control->retire_tail.load(std::memory_order_relaxed);
+    while (head != tail) {
+        const retired_t &entry = control->retired[head];
+        if (entry.retired_version >= min_version)
+            break;
+        control->shard.deallocate_bytes(entry.cell);
+        head = (head + 1) & control->retire_mask;
+    }
+    control->retire_head.store(head, std::memory_order_relaxed);
 }
 
 } // namespace detail
@@ -266,12 +357,15 @@ init(arena::arena_t &arena, const char *dotenv_path, const environment_config_t 
     if (detail::control_ref() != nullptr)
         throw std::logic_error("environment already initialized");
     if (config.max_keys == 0 || config.max_key_len == 0 || config.max_value_len == 0 ||
-        config.max_updates == 0 || config.max_threads == 0)
+        config.value_cells == 0 || config.max_threads == 0 || config.journal_size == 0)
         throw std::invalid_argument("environment capacity must be non-zero");
+    if ((config.journal_size & (config.journal_size - 1)) != 0)
+        throw std::invalid_argument("environment journal_size must be a power of two");
 
     arena::object_spec_t specs[detail::kSpecCount] = {};
     std::size_t slots = 0;
-    detail::make_specs(config, specs, slots);
+    std::size_t retire_capacity = 0;
+    detail::make_specs(config, specs, slots, retire_capacity);
 
     auto shard = arena.create_shard(
         detail::kShardTag, std::span<const arena::object_spec_t>(specs, detail::kSpecCount));
@@ -280,7 +374,6 @@ init(arena::arena_t &arena, const char *dotenv_path, const environment_config_t 
 
     shard.get_bucket(detail::kKeyTag, arena::concurrency_model::lock_free);
     shard.get_bucket(detail::kValueTag, arena::concurrency_model::lock_free);
-    shard.get_bucket(detail::kViewTag, arena::concurrency_model::lock_free);
 
     auto *control_raw = shard.allocate_tagged(
         detail::kControlTag, sizeof(detail::control_t), alignof(detail::control_t));
@@ -290,10 +383,14 @@ init(arena::arena_t &arena, const char *dotenv_path, const environment_config_t 
     control->shard = shard;
     control->slots = slots;
     control->slot_mask = slots - 1;
+    control->journal_size = config.journal_size;
+    control->journal_mask = config.journal_size - 1;
+    control->retire_capacity = retire_capacity;
+    control->retire_mask = retire_capacity - 1;
     control->max_keys = config.max_keys;
     control->max_key_len = config.max_key_len;
     control->max_value_len = config.max_value_len;
-    control->max_updates = config.max_updates;
+    control->max_threads = config.max_threads;
 
     auto *key_raw = shard.allocate_tagged(detail::kKeyTableTag,
                                           slots * sizeof(std::atomic<detail::key_cell_t *>),
@@ -301,22 +398,40 @@ init(arena::arena_t &arena, const char *dotenv_path, const environment_config_t 
     auto *global_raw = shard.allocate_tagged(detail::kGlobalTag,
                                              slots * sizeof(std::atomic<detail::value_cell_t *>),
                                              alignof(std::atomic<detail::value_cell_t *>));
-    auto *journal_raw = shard.allocate_tagged(
-        detail::kRingTag, config.max_updates * sizeof(detail::patch_t), alignof(detail::patch_t));
-    if (key_raw == nullptr || global_raw == nullptr || journal_raw == nullptr)
+    auto *journal_raw = shard.allocate_tagged(detail::kJournalTag,
+                                              config.journal_size * sizeof(detail::patch_t),
+                                              alignof(detail::patch_t));
+    auto *retire_raw = shard.allocate_tagged(detail::kRetireTag,
+                                             retire_capacity * sizeof(detail::retired_t),
+                                             alignof(detail::retired_t));
+    auto *viewreg_raw = shard.allocate_tagged(detail::kViewRegTag,
+                                              config.max_threads * sizeof(detail::view_t *),
+                                              alignof(detail::view_t *));
+    if (key_raw == nullptr || global_raw == nullptr || journal_raw == nullptr ||
+        retire_raw == nullptr || viewreg_raw == nullptr)
         throw std::runtime_error("environment: table allocation failed");
 
     control->key_table = reinterpret_cast<std::atomic<detail::key_cell_t *> *>(key_raw);
     control->global = reinterpret_cast<std::atomic<detail::value_cell_t *> *>(global_raw);
     control->journal = reinterpret_cast<detail::patch_t *>(journal_raw);
+    control->retired = reinterpret_cast<detail::retired_t *>(retire_raw);
+    control->views = reinterpret_cast<detail::view_t **>(viewreg_raw);
     for (std::size_t i = 0; i < slots; ++i) {
         ::new (static_cast<void *>(control->key_table + i))
             std::atomic<detail::key_cell_t *>(nullptr);
         ::new (static_cast<void *>(control->global + i))
             std::atomic<detail::value_cell_t *>(nullptr);
     }
-    for (std::size_t i = 0; i < config.max_updates; ++i)
+    for (std::size_t i = 0; i < config.journal_size; ++i)
         ::new (static_cast<void *>(control->journal + i)) detail::patch_t{};
+    for (std::size_t i = 0; i < config.max_threads; ++i) {
+        auto *raw = control->shard.allocate_tagged(
+            detail::kViewTag, detail::view_object_bytes(slots), alignof(std::uint64_t));
+        if (raw == nullptr)
+            throw std::runtime_error("environment: view allocation failed");
+        std::memset(raw, 0, detail::view_object_bytes(slots));
+        control->views[i] = reinterpret_cast<detail::view_t *>(raw);
+    }
 
     if (config.read_process_env)
         detail::load_process_env(control);
@@ -341,7 +456,8 @@ inline void shutdown() noexcept {
 constexpr std::size_t environment_footprint(const environment_config_t &config) {
     arena::object_spec_t specs[detail::kSpecCount] = {};
     std::size_t slots = 0;
-    detail::make_specs(config, specs, slots);
+    std::size_t retire_capacity = 0;
+    detail::make_specs(config, specs, slots, retire_capacity);
     return arena::shard_footprint(specs);
 }
 
@@ -360,16 +476,16 @@ constexpr arena::arena_config_t environment_arena_config(const environment_confi
     return arena_config;
 }
 
-// A snapshot of how much of the store's fixed capacity has been used. Useful to
-// detect the fixed budgets filling up before set_env starts returning false.
+// A snapshot of the store's activity. Updates are unbounded; this reports how
+// many keys exist, how many updates have committed, and how many retired cells
+// are still pinned by lagging views (the only thing that can exhaust the
+// fixed value pool).
 struct environment_stats_t {
     std::size_t keys_used = 0;
     std::size_t max_keys = 0;
-    std::size_t updates_used = 0;
-    std::size_t max_updates = 0;
-
-    [[nodiscard]] std::size_t key_room() const noexcept { return max_keys - keys_used; }
-    [[nodiscard]] std::size_t update_room() const noexcept { return max_updates - updates_used; }
+    std::uint64_t total_updates = 0;
+    std::size_t journal_size = 0;
+    std::size_t retired_pending = 0;
 };
 
 [[nodiscard]] inline environment_stats_t environment_stats() noexcept {
@@ -378,18 +494,23 @@ struct environment_stats_t {
         return {};
     environment_stats_t stats;
     stats.max_keys = control->max_keys;
-    stats.max_updates = control->max_updates;
-    stats.updates_used = control->version.load(std::memory_order_acquire);
+    stats.journal_size = control->journal_size;
+    stats.total_updates = control->version.load(std::memory_order_acquire);
     for (std::size_t i = 0; i < control->slots; ++i) {
         if (control->key_table[i].load(std::memory_order_acquire) != nullptr)
             ++stats.keys_used;
     }
+    const std::size_t head = control->retire_head.load(std::memory_order_acquire);
+    const std::size_t tail = control->retire_tail.load(std::memory_order_acquire);
+    stats.retired_pending = (tail - head + control->retire_capacity) & control->retire_mask;
     return stats;
 }
 
 // Read a key. On the fast path this only compares the thread's cached version
-// with the global counter; a behind thread replays the journal delta. Returns
-// `fallback` when the key is missing or the module is not initialized.
+// with the global counter; a behind thread replays the delta ring, and a thread
+// that fell past the ring reseeds from the global slots. The returned view is
+// valid until the next get_env/set_env on this thread. Returns `fallback` when
+// the key is missing or the module is not initialized.
 [[nodiscard]] inline std::string_view get_env(std::string_view name, std::string_view fallback) {
     auto *control = detail::control_ref();
     if (control == nullptr || name.size() > control->max_key_len)
@@ -411,13 +532,17 @@ struct environment_stats_t {
         cell = control->global[id].load(std::memory_order_acquire);
         view->cached[id] = cell;
     }
+    std::atomic_ref<std::uint64_t>(view->published)
+        .store(view->my_version, std::memory_order_release);
     return cell != nullptr ? detail::as_view(cell) : fallback;
 }
 
-// Publish a new immutable value cell for `name`, append it to the journal and
-// bump the global version. Writers serialize on a short mutex; readers never
-// take it. Returns false when the module is uninitialized, a bound is exceeded
-// or the fixed capacities are exhausted.
+// Publish a new immutable value cell for `name`, retire the previous one,
+// append the update to the delta ring and bump the global version. Retired
+// cells whose version is behind every live view are recycled. Writers serialize
+// on a short mutex; readers never take it. Returns false when the module is
+// uninitialized, a bound is exceeded, or the value pool is momentarily
+// exhausted by pinned retired cells.
 inline bool set_env(std::string_view name, std::string_view value) {
     auto *control = detail::control_ref();
     if (control == nullptr || name.empty() || name.size() > control->max_key_len ||
@@ -425,10 +550,9 @@ inline bool set_env(std::string_view name, std::string_view value) {
         return false;
 
     const std::lock_guard lock{control->writer};
-    const std::uint64_t version = control->version.load(std::memory_order_relaxed);
-    if (version >= control->max_updates)
-        return false;
+    detail::reclaim(control);
 
+    const std::uint64_t version = control->version.load(std::memory_order_relaxed);
     const std::size_t id = detail::find_or_insert(control, name.data(), name.size());
     if (id == detail::kNoKey)
         return false;
@@ -441,13 +565,31 @@ inline bool set_env(std::string_view name, std::string_view value) {
     cell->len = static_cast<std::uint32_t>(value.size());
     cell->pad = 0;
     std::memcpy(detail::value_bytes(cell), value.data(), value.size());
+
+    detail::value_cell_t *old = control->global[id].load(std::memory_order_relaxed);
     control->global[id].store(cell, std::memory_order_release);
 
-    detail::patch_t &patch = control->journal[version];
-    patch.key_id = static_cast<std::uint32_t>(id);
-    patch.pad = 0;
-    patch.value = cell;
+    detail::patch_t &patch = control->journal[version & control->journal_mask];
+    patch.tag.store(0, std::memory_order_release);
+    patch.key_id.store(static_cast<std::uint32_t>(id), std::memory_order_relaxed);
+    patch.value.store(cell, std::memory_order_relaxed);
+    patch.tag.store(version + 1, std::memory_order_release);
     control->version.store(version + 1, std::memory_order_release);
+
+    if (old != nullptr) {
+        const std::size_t tail = control->retire_tail.load(std::memory_order_relaxed);
+        control->retired[tail] = {old, version};
+        control->retire_tail.store((tail + 1) & control->retire_mask, std::memory_order_release);
+    }
+
+    // Keep the writer's own view current so it never pins retired cells.
+    const detail::view_slot_guard &guard = detail::tls_guard();
+    if (guard.view != nullptr &&
+        guard.epoch == detail::epoch_ref().load(std::memory_order_relaxed) &&
+        guard.view->my_version != control->version.load(std::memory_order_relaxed))
+        detail::sync_view(control, guard.view, version + 1);
+
+    detail::reclaim(control);
     return true;
 }
 

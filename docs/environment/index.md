@@ -66,9 +66,11 @@ counter:
   cache and its version. It never clones the whole map.
 
 Because published cells are immutable, replay is race-free: a cell a thread is
-reading can never change under it. Everything the module owns is carved from
-the arena at `init`, so there is no `malloc` on any path — see
-[Internals](internals) for the full mechanism.
+reading can never change under it. Superseded cells are *retired* and recycled
+once no live view can still see them, so updates are effectively unbounded while
+the memory stays fixed. Everything the module owns is carved from the arena at
+`init`, so there is no `malloc` on any path — see [Internals](internals) for the
+full mechanism.
 
 ## The pieces
 

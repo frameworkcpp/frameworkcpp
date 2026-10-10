@@ -11,21 +11,24 @@ Everything below lives in `namespace frameworkcpp::environment::detail`, in
 
 ## The shard layout
 
-`init` carves **one shard** with seven buckets. Fixed arrays all around; nothing
+`init` carves **one shard** with nine buckets. Fixed arrays all around; nothing
 grows, nothing is heap-allocated.
 
 ```
 control_t                    the module's root: pointers + capacities (1)
 key_table   [ slots ]        open-addressing array of key_cell_t*        (slots)
 global      [ slots ]        open-addressing array of value_cell_t*      (slots)
-journal     [ max_updates ]  append-only patch_t records
+journal     [ journal_size ] delta ring of patch_t (power-of-two length)
+retired     [ retire_cap ]   FIFO of retired cells awaiting recycle
 key_cell    [ max_keys ]     immutable key bytes
-value_cell  [ max_keys + max_updates ]   immutable value bytes
+value_cell  [ max_keys + value_cells ]   immutable value bytes (recycled)
 view        [ max_threads ]  one view_t per thread
+view_reg    [ max_threads ]  pointers to the pre-allocated views
 ```
 
 `slots` is `next_pow2(max_keys * 2)`, so the key table stays at or below a 0.5
-load factor and open addressing stays short.
+load factor and open addressing stays short. The journal is a ring indexed by
+`version & (journal_size - 1)`.
 
 ## The structures
 
@@ -38,20 +41,27 @@ struct key_cell_t {            // immutable once published; id == its table slot
     // key bytes follow the struct
 };
 
-struct value_cell_t {          // immutable once published
+struct value_cell_t {          // immutable once published, recycled when retired
     std::uint32_t len;
     std::uint32_t pad;
     // value bytes follow the struct
 };
 
-struct patch_t {               // one journal entry per set_env
-    std::uint32_t key_id;      // which slot changed
-    std::uint32_t pad;
-    value_cell_t *value;       // the new cell
+struct patch_t {               // one delta-ring slot per update
+    std::atomic<std::uint64_t> tag;      // version + 1 when valid, 0 while writing
+    std::atomic<std::uint32_t> key_id;
+    std::atomic<value_cell_t *> value;
+};
+
+struct retired_t {             // a superseded cell waiting to be recycled
+    value_cell_t *cell;
+    std::uint64_t retired_version;
 };
 
 struct view_t {                // one per thread
     std::uint64_t my_version;  // how far this cache has caught up
+    std::uint64_t published;   // my_version, published to the reclaimer
+    std::uint32_t active;      // set on thread exit
     value_cell_t *cached[];    // indexed by key_id
 };
 ```
@@ -68,11 +78,14 @@ struct control_t {
     arena::arena_shard_t shard;
     std::atomic<key_cell_t *>   *key_table;   // [slots]
     std::atomic<value_cell_t *> *global;      // [slots]
-    patch_t                     *journal;     // [max_updates]
-    std::atomic<std::uint64_t>   version;     // committed updates
-    std::size_t slots, slot_mask;
-    std::size_t max_key_len, max_value_len, max_updates;
-    std::mutex writer;                        // serializes set_env
+    patch_t                     *journal;     // [journal_size]
+    retired_t                   *retired;     // [retire_cap], FIFO
+    view_t                     **views;       // [max_threads]
+    std::atomic<std::uint64_t>   version;     // committed updates (monotonic)
+    std::atomic<std::size_t>     next_view;   // view allocator
+    std::atomic<std::size_t>     retire_head; // FIFO cursors
+    std::atomic<std::size_t>     retire_tail;
+    // sizes + masks..., std::mutex writer
 };
 ```
 
@@ -94,17 +107,19 @@ mutex, so the table has a single writer.
 
 ## The version protocol
 
-This is the heart of the design. `version` counts committed updates; the journal
-is the ordered list of what each update changed.
+This is the heart of the design. `version` counts committed updates; the ring is
+the ordered list of what each update changed. `set_env` on a key that already
+exists also **retires** the previous cell.
 
 **Writer** (`set_env`, holding the mutex):
 
-1. Resolve or insert the key → `key_id`.
-2. Carve a fresh `value_cell_t`, fill it, publish it into `global[key_id]`
-   (release).
-3. Append `journal[version] = {key_id, cell}`.
-4. `version.store(version + 1, release)` — this single store is the commit
-   point.
+1. Recycle any retired cells no live view can still see (see below).
+2. Resolve or insert the key → `key_id`.
+3. Carve a fresh `value_cell_t`, fill it, swap it into `global[key_id]`
+   (release); push the old cell onto the retirement FIFO.
+4. Write `journal[version & mask] = {tag: version + 1, key_id, cell}` — the tag
+   is bumped last with a release store, so the slot is only valid once complete.
+5. `version.store(version + 1, release)` — the commit point.
 
 **Reader** (`get_env`):
 
@@ -117,50 +132,55 @@ if (cell == nullptr) {                    // key new to this thread
     cell = control->global[id].load(acquire);
     view->cached[id] = cell;
 }
+std::atomic_ref(view->published).store(view->my_version, release);
 ```
 
-`sync_view` walks only the missed entries and applies them to the cache:
+`sync_view` replays only the missed slots, using the tag as a commit gate:
 
 ```cpp
-for (std::uint64_t w = view->my_version; w < target; ++w)
-    view->cached[control->journal[w].key_id] = control->journal[w].value;
+if (target - my >= control->journal_size) { reseed(view); return; } // fell off the ring
+for (v in [my, target)) {
+    t1 = slot.tag.load(acquire);
+    if (t1 != v + 1) { reseed(view); return; }   // slot was overwritten by a wrap
+    read key_id, value;
+    if (slot.tag.load(acquire) != t1) { reseed(view); return; } // raced a writer
+    view->cached[key_id] = value;
+}
 view->my_version = target;
 ```
 
-So a caught-up read costs **one atomic load** (the version) plus array indexing;
-a behind read costs the number of missed updates. The map is never cloned.
+The double tag read is a seqlock: a slot is only trusted if it is stable across
+the field reads, which also makes rewriting a wrapped slot safe.
 
-## Why it is safe
+## Epoch reclamation
 
-- **Immutable cells.** A `value_cell_t` is filled before it is published and
-  never written again, so a thread can read a cell without fear of it changing.
-  `set_env` produces a *new* cell; it never edits a live one.
-- **Append-only journal.** Entries are written once, in version order. A reader
-  replaying a suffix touches only committed entries.
-- **Ordering.** The writer fills the cell and the journal entry, then commits
-  with a *release* store to `version`. A reader that *acquire*-loads `version`
-  and sees the new value is guaranteed to see the matching cell and journal
-  entry. The same release/acquire pairing guards `global` and `key_table`.
-- **Single writer.** All mutation (key insertion, `global` stores, journal
-  appends, version bumps) happens under `control->writer`, so those structures
-  have one writer and many readers — the classic lock-free-reader shape.
+Immutable cells would leak forever, so retired cells are recycled once no reader
+can still reference them. A cell retired at version `r` is safe to reuse when
+**every live view has published a version greater than `r`** — at that point no
+view's cache holds the retired cell, and no view will replay the slot that
+introduced it. The reclaimer (the single writer, under its mutex) takes the
+minimum `published` across all active views and frees every FIFO entry older
+than it:
 
-## Capacities and the memory budget
+```cpp
+min = version;                          // no active views -> everything is free
+for (view in active_views) min = min(min, view->published);
+while (fifo not empty && fifo.front().retired_version < min)
+    free(fifo.pop_front());
+```
 
-Every capacity is fixed at `init`; there is no reclamation, which is why the
-store is heap-free and conflict-free:
+A view publishes its version at the end of every `get_env` and is marked
+inactive when its thread exits (a `thread_local` guard, keyed by an init/shutdown
+epoch so it never touches a dead arena).
 
-| Capacity | Bounds |
-| --- | --- |
-| `max_keys` | distinct keys (process env + file + new keys from `set_env`) |
-| `max_key_len` | longest key, in bytes |
-| `max_value_len` | longest value, in bytes |
-| `max_updates` | total `set_env` calls over the store's lifetime |
-| `max_threads` | number of per-thread views |
+## Lifetime of a returned view
 
-Because each `set_env` publishes a fresh immutable cell, the update budget is
-the total number of writes, not a window. When any bound is hit, `set_env`
-returns `false` — a loud, reproducible failure instead of a hidden allocation.
+Because cells are recycled, a `get_env` result is valid **until the next
+`get_env`/`set_env` on the same thread** — not for the arena's lifetime. The
+reclaimer honors this exactly: a cell cannot be recycled while the thread that
+holds a view of it has not advanced, so the value is alive for as long as it was
+promised. Read it, copy it, or compare it — but do not stash it across calls.
+
 
 ## Heap-free, like the arena
 
