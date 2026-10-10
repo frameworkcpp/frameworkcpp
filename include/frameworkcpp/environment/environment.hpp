@@ -39,6 +39,7 @@ struct control_t {
     std::atomic<std::uint64_t> version;
     std::size_t slots;
     std::size_t slot_mask;
+    std::size_t max_keys;
     std::size_t max_key_len;
     std::size_t max_value_len;
     std::size_t max_updates;
@@ -57,9 +58,9 @@ inline std::atomic<std::uint64_t> &epoch_ref() noexcept {
     return epoch;
 }
 
-inline void make_specs(const environment_config_t &config,
-                       arena::object_spec_t (&specs)[kSpecCount],
-                       std::size_t &slots) {
+constexpr void make_specs(const environment_config_t &config,
+                          arena::object_spec_t (&specs)[kSpecCount],
+                          std::size_t &slots) {
     slots = next_pow2(config.max_keys * 2);
     specs[0] = {kControlTag, sizeof(control_t), alignof(control_t), 1};
     specs[1] = {
@@ -289,6 +290,7 @@ init(arena::arena_t &arena, const char *dotenv_path, const environment_config_t 
     control->shard = shard;
     control->slots = slots;
     control->slot_mask = slots - 1;
+    control->max_keys = config.max_keys;
     control->max_key_len = config.max_key_len;
     control->max_value_len = config.max_value_len;
     control->max_updates = config.max_updates;
@@ -331,12 +333,58 @@ inline void shutdown() noexcept {
     detail::epoch_ref().fetch_add(1, std::memory_order_relaxed);
 }
 
-// Bytes the module's shard will occupy for a given configuration.
-inline std::size_t environment_footprint(const environment_config_t &config) {
+// Bytes the module's shard will occupy for a given configuration. Usable in a
+// constant expression, so you can derive a compile-time arena budget:
+//
+//     constexpr environment_config_t kEnv{};
+//     constexpr std::size_t kEnvBytes = environment_footprint(kEnv);
+constexpr std::size_t environment_footprint(const environment_config_t &config) {
     arena::object_spec_t specs[detail::kSpecCount] = {};
     std::size_t slots = 0;
     detail::make_specs(config, specs, slots);
     return arena::shard_footprint(specs);
+}
+
+// The whole arena budget the module needs: its footprint rounded up to a page,
+// plus `extra_bytes` for anything else you carve into the same arena. Feed the
+// result straight into an arena_config_t.
+constexpr std::size_t environment_arena_bytes(const environment_config_t &config,
+                                              std::size_t extra_bytes = 0) {
+    return arena::round_to_page(environment_footprint(config) + extra_bytes);
+}
+
+constexpr arena::arena_config_t environment_arena_config(const environment_config_t &config,
+                                                         std::size_t extra_bytes = 0) {
+    arena::arena_config_t arena_config{};
+    arena_config.size = environment_arena_bytes(config, extra_bytes);
+    return arena_config;
+}
+
+// A snapshot of how much of the store's fixed capacity has been used. Useful to
+// detect the fixed budgets filling up before set_env starts returning false.
+struct environment_stats_t {
+    std::size_t keys_used = 0;
+    std::size_t max_keys = 0;
+    std::size_t updates_used = 0;
+    std::size_t max_updates = 0;
+
+    [[nodiscard]] std::size_t key_room() const noexcept { return max_keys - keys_used; }
+    [[nodiscard]] std::size_t update_room() const noexcept { return max_updates - updates_used; }
+};
+
+[[nodiscard]] inline environment_stats_t environment_stats() noexcept {
+    auto *control = detail::control_ref();
+    if (control == nullptr)
+        return {};
+    environment_stats_t stats;
+    stats.max_keys = control->max_keys;
+    stats.max_updates = control->max_updates;
+    stats.updates_used = control->version.load(std::memory_order_acquire);
+    for (std::size_t i = 0; i < control->slots; ++i) {
+        if (control->key_table[i].load(std::memory_order_acquire) != nullptr)
+            ++stats.keys_used;
+    }
+    return stats;
 }
 
 // Read a key. On the fast path this only compares the thread's cached version

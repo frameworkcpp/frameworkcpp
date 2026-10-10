@@ -40,7 +40,7 @@ constexpr std::size_t next_pow2(std::size_t value) {
     return p;
 }
 
-inline std::size_t align_up(std::size_t value, std::size_t alignment) {
+constexpr std::size_t align_up(std::size_t value, std::size_t alignment) {
     return (value + alignment - 1) & ~(alignment - 1);
 }
 
@@ -89,15 +89,15 @@ inline const char *value_bytes(const value_cell_t *cell) {
     return reinterpret_cast<const char *>(cell + 1);
 }
 
-inline std::size_t key_object_bytes(std::size_t max_key_len) {
+constexpr std::size_t key_object_bytes(std::size_t max_key_len) {
     return align_up(sizeof(key_cell_t) + max_key_len, alignof(std::uint64_t));
 }
 
-inline std::size_t value_object_bytes(std::size_t max_value_len) {
+constexpr std::size_t value_object_bytes(std::size_t max_value_len) {
     return align_up(sizeof(value_cell_t) + max_value_len, alignof(std::uint64_t));
 }
 
-inline std::size_t view_object_bytes(std::size_t slots) {
+constexpr std::size_t view_object_bytes(std::size_t slots) {
     return align_up(offsetof(view_t, cached) + (slots * sizeof(value_cell_t *)),
                     alignof(std::uint64_t));
 }

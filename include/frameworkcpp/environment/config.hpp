@@ -20,7 +20,7 @@ struct environment_config_t {
     bool read_process_env = true;     // inherit the process environment at init
 };
 
-// How many bytes the module's own shard will occupy in the arena. Add this to
-// your arena budget when sizing it.
-std::size_t environment_footprint(const environment_config_t &config);
+// How many bytes the module's own shard will occupy in the arena. Usable in a
+// constant expression (defined in <frameworkcpp/environment/environment.hpp>).
+constexpr std::size_t environment_footprint(const environment_config_t &config);
 } // namespace frameworkcpp::environment

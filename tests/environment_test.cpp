@@ -151,5 +151,51 @@ TEST_F(EnvironmentTest, NotInitializedFallsBack) {
     EXPECT_FALSE(set_env("ANYTHING", "x"));
 }
 
+TEST_F(EnvironmentTest, BudgetIsConstexpr) {
+    constexpr environment_config_t config{};
+    constexpr std::size_t footprint = environment_footprint(config);
+    constexpr std::size_t budget = environment_arena_bytes(config);
+    static_assert(footprint > 0, "footprint must be computable at compile time");
+    static_assert(budget >= footprint, "the arena budget must cover the footprint");
+    static_assert(budget % 4096 == 0, "the arena budget must be page aligned");
+
+    constexpr environment_config_t small{.max_keys = 8, .max_updates = 8, .max_threads = 2};
+    static_assert(environment_footprint(small) < footprint,
+                  "a smaller config must have a smaller footprint");
+
+    constexpr auto arena_config = environment_arena_config(config, 64 * 1024);
+    static_assert(arena_config.size == environment_arena_bytes(config, 64 * 1024));
+
+    // And the derived budget actually works at runtime.
+    auto arena = arena::arena_t{environment_arena_config(config)};
+    init(arena, nullptr, config);
+    EXPECT_TRUE(set_env("FC_BUDGET", "ok"));
+    EXPECT_EQ(get_env("FC_BUDGET", ""), "ok");
+}
+
+TEST_F(EnvironmentTest, StatsReportUsage) {
+    environment_config_t config;
+    config.read_process_env = false;
+    config.max_keys = 4;
+    config.max_updates = 3;
+    auto arena = make_arena();
+    init(arena, nullptr, config);
+
+    auto stats = environment_stats();
+    EXPECT_EQ(stats.max_keys, 4U);
+    EXPECT_EQ(stats.max_updates, 3U);
+    EXPECT_EQ(stats.keys_used, 0U);
+    EXPECT_EQ(stats.updates_used, 0U);
+    EXPECT_EQ(stats.key_room(), 4U);
+    EXPECT_EQ(stats.update_room(), 3U);
+
+    ASSERT_TRUE(set_env("FC_S1", "a"));
+    ASSERT_TRUE(set_env("FC_S2", "b"));
+    stats = environment_stats();
+    EXPECT_EQ(stats.keys_used, 2U);
+    EXPECT_EQ(stats.updates_used, 2U);
+    EXPECT_EQ(stats.update_room(), 1U);
+}
+
 } // namespace
 } // namespace frameworkcpp::environment
