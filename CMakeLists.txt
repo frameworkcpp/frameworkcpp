@@ -83,6 +83,11 @@ if(FRAMEWORKCPP_BUILD_TESTING)
     target_compile_features(frameworkcpp_arena_test PRIVATE cxx_std_20)
     gtest_discover_tests(frameworkcpp_arena_test)
 
+    add_executable(frameworkcpp_arena_heap_test tests/arena_heap_test.cpp)
+    target_link_libraries(frameworkcpp_arena_heap_test PRIVATE frameworkcpp GTest::gtest_main)
+    target_compile_features(frameworkcpp_arena_heap_test PRIVATE cxx_std_20)
+    gtest_discover_tests(frameworkcpp_arena_heap_test)
+
     add_executable(frameworkcpp_arena_ptr_test tests/arena_ptr_test.cpp)
     target_link_libraries(frameworkcpp_arena_ptr_test PRIVATE frameworkcpp GTest::gtest_main)
     target_compile_features(frameworkcpp_arena_ptr_test PRIVATE cxx_std_20)
@@ -100,6 +105,7 @@ if(FRAMEWORKCPP_BUILD_TESTING)
             set_target_properties(
                 frameworkcpp_version_test
                 frameworkcpp_arena_test
+                frameworkcpp_arena_heap_test
                 frameworkcpp_arena_ptr_test
                 frameworkcpp_arena_allocator_test
                 PROPERTIES CXX_CLANG_TIDY "${_frameworkcpp_clang_tidy}"

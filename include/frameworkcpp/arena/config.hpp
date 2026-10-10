@@ -44,6 +44,11 @@ struct object_spec_t {
     std::size_t count;
 };
 
+// Bounded registries keep arena_t heap-free: shards and regions live in fixed
+// arrays sized at compile time. These constants are the hard caps.
+inline constexpr std::size_t kMaxArenaShards = 256;
+inline constexpr std::size_t kMaxArenaRegions = 16;
+
 struct arena_config_t {
     std::size_t size = 1024 * 1024;
     std::size_t soft_limit = 0; // warning watermark; 0 disables it
@@ -51,6 +56,8 @@ struct arena_config_t {
     overflow_mode overflow = overflow_mode::throw_error;
     arena_warning_fn on_warning = nullptr;
     bool touch_pages = false;
+    std::size_t max_shards = kMaxArenaShards;   // shard/tag registry capacity
+    std::size_t max_regions = kMaxArenaRegions; // mmap region capacity
 };
 
 struct bucket_stats_t {

@@ -48,14 +48,26 @@ rejected shard simply returns an empty view.
 
 ```cpp
 struct arena_config_t {
-    std::size_t    size        = 1024 * 1024; // initial region, in bytes
-    std::size_t    soft_limit  = 0;        // warn when reserved bytes reach this
-    std::size_t    hard_limit  = 0;        // hard ceiling; 0 = uncapped
+    std::size_t    size        = 1024 * 1024;  // initial region, in bytes
+    std::size_t    soft_limit  = 0;            // warn when reserved bytes reach this
+    std::size_t    hard_limit  = 0;            // hard ceiling; 0 = uncapped
     overflow_mode  overflow    = overflow_mode::throw_error; // or abort
-    arena_warning_fn on_warning = nullptr; // callback fired once at soft_limit
-    bool           touch_pages = false;    // MAP_POPULATE to pre-fault pages
+    arena_warning_fn on_warning = nullptr;     // callback fired once at soft_limit
+    bool           touch_pages = false;        // MAP_POPULATE to pre-fault pages
+    std::size_t    max_shards  = kMaxArenaShards;  // shard registry capacity
+    std::size_t    max_regions = kMaxArenaRegions; // mmap segment capacity
 };
 ```
+
+### The registry, without the heap
+
+`arena_t` tracks its shards and `mmap` segments in **fixed arrays sized at
+compile time** (`kMaxArenaShards`, `kMaxArenaRegions`), so creating a shard
+never allocates. `max_shards` and `max_regions` just carve a smaller slice of
+that fixed registry — raise them, but never above the constants (the
+constructor rejects that with `std::invalid_argument`). All the memory your
+system touches — buckets, object pools, even the shard bookkeeping — lives in
+the arena's own `mmap` segments. There is no heap anywhere in the store.
 
 ### The budget policy
 
