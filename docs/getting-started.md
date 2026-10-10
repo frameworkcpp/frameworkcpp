@@ -5,8 +5,9 @@ systems. It is modular: each module is a self-contained set of headers under
 `include/frameworkcpp/<module>/`, and you only pay for the modules you use.
 
 The documented modules are [Memory Management](/memory-management/), the
-arena-backed allocator layer, and [Environment](/environment/), a dotenv-style
-configuration store built on top of it. More modules are on the way.
+arena-backed allocator layer, and [Environment Management](/environment/), a
+dotenv-style configuration store built on top of it. More modules are on the
+way.
 
 ## What you need
 
@@ -79,5 +80,5 @@ int main()
 
 Read the [Memory Management](/memory-management/) section to understand the
 model — shards, buckets, concurrency models and smart pointers — then the
-[Environment](/environment/) module that builds the configuration store on top
-of it.
+[Environment Management](/environment/) module that builds the configuration
+store on top of it.

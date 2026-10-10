@@ -34,9 +34,13 @@ export default defineConfig({
         ]
       },
       {
-        text: 'Environment',
+        text: 'Environment Management',
         items: [
-          { text: 'Overview', link: '/environment/' }
+          { text: 'Overview', link: '/environment/' },
+          { text: 'Lifecycle', link: '/environment/lifecycle' },
+          { text: 'The API', link: '/environment/api' },
+          { text: 'Internals', link: '/environment/internals' },
+          { text: 'Configuration', link: '/environment/configuration' }
         ]
       }
     ],

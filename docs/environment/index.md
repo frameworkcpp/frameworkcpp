@@ -1,33 +1,41 @@
-# Environment
+# Environment Management
 
 Software is configured through the environment: what the process inherited when
-it started, and what a `.env` file declares. `frameworkcpp::environment` is a
-dotenv-style store for exactly that, built on the arena. Every key and value
-lives in a single arena shard, reads never touch the heap or take a lock, and
-values are immutable once published — a write publishes a new cell instead of
-editing the old one.
+it started, and what a `.env` file declares. `frameworkcpp::environment` is the
+**Environment Management** module — a dotenv-style store built on the arena.
+Every key and value lives in a single arena shard, reads never touch the heap or
+take a lock, and values are immutable once published: a write publishes a new
+cell instead of editing the old one.
+
+The whole module is header-only and lives in one include:
+
+```cpp
+#include <frameworkcpp/environment/environment.hpp>
+```
 
 ## The vocabulary
 
 | Concept | What it is |
 | --- | --- |
-| **Store** | The module's arena shard: one key table, one value pool, one journal, one view per thread. |
-| **Key** | A name (up to `max_key_len` bytes) that maps to the latest published value. |
-| **Value** | An immutable cell holding the value bytes. `set_env` always builds a fresh cell. |
-| **View** | A per-thread cache of value pointers plus the version that cache is current to. |
+| **Store** | The module's arena shard. It owns the key table, the value pool, the journal and one view per thread. |
+| **Key** | A name (up to `max_key_len` bytes) that maps to the latest published value. Keys are immutable once inserted. |
+| **Value** | An immutable cell holding the value bytes. `set_env` always builds a fresh cell; nothing is edited in place. |
+| **View** | A per-thread cache of value pointers plus the version that cache is current to. It is what makes reads cheap. |
 | **Journal** | The append-only list of updates a behind thread replays to catch up. |
+| **Version** | A single global counter. A thread compares its own version with it to know whether its cache is current. |
 
 ## The mental model
 
-1. You build an arena and call `init(arena, "my.env")`. It carves a shard and
-   loads the configuration: first the process environment, then the file — and
-   the **process wins**, the file only fills keys that are still unset.
-2. `get_env(key, fallback)` reads. A warmed-up thread compares its cached
-   version against the global counter and, if they match, reads its own cache —
-   no shared atomic beyond that one counter, no lock, no heap.
-3. `set_env(key, value)` publishes a new immutable value cell, appends the
-   update to the journal and bumps the global version. Writers serialize on a
-   short mutex; readers never take it.
+1. You build an `arena::arena_t` and call `environment::init(arena, "app.env")`.
+   The module carves its own shard out of the arena and loads the configuration:
+   first the **process environment**, then the **file** — and the process wins,
+   the file only fills keys that are still unset.
+2. `environment::get_env(key, fallback)` reads. A warmed-up thread compares its
+   cached version against the global counter and, if they match, reads its own
+   private cache — no shared atomic beyond that one counter, no lock, no heap.
+3. `environment::set_env(key, value)` publishes a new immutable value cell,
+   appends the update to the journal and bumps the global version. Writers
+   serialize on a short mutex; readers never take it.
 
 ```cpp
 #include <frameworkcpp/arena/arena.hpp>
@@ -38,78 +46,35 @@ using namespace frameworkcpp;
 int main()
 {
     arena::arena_t arena{arena::arena_config_t{}};
-    environment::init(arena, "app.env");     // process env, then the file
+    environment::init(arena, "app.env");         // process env, then the file
 
-    environment::get_env("LOG_LEVEL", "info"); // read (never allocates)
-    environment::set_env("LOG_LEVEL", "debug"); // publish a new value
+    environment::get_env("LOG_LEVEL", "info");   // read (never allocates)
+    environment::set_env("LOG_LEVEL", "debug");  // publish a new value
 
-    environment::shutdown();                   // drop the module handle
+    environment::shutdown();                     // drop the module handle
 }
 ```
 
-## The version trick
+## Why it is cheap (and heap-free)
 
-The interesting part is how a multithreaded read stays cheap. Each thread keeps
-a private cache and a version number. A read compares that version with a single
-global counter:
+The interesting part is how a multithreaded read stays cheap. Each thread keeps a
+private cache and a version number; a read compares that version with one global
+counter:
 
 - **same version** → read straight from the private cache;
-- **behind** → replay only the journal entries the thread missed, then update
-  the cache and its version. It never clones the whole map.
+- **behind** → replay only the journal entries the thread missed, update the
+  cache and its version. It never clones the whole map.
 
 Because published cells are immutable, replay is race-free: a cell a thread is
-reading can never change under it. When a thread falls too far behind, or a key
-is new to it, it simply reads the key's current cell from the global table and
-caches it.
+reading can never change under it. Everything the module owns is carved from
+the arena at `init`, so there is no `malloc` on any path — see
+[Internals](internals) for the full mechanism.
 
-## Capacities (and why there is no heap)
+## The pieces
 
-The module is sized up front. There is nothing to grow and nothing to `malloc`
-after `init`:
+Read them top to bottom — each page builds on the previous one:
 
-```cpp
-struct environment_config_t {
-    std::size_t max_keys = 256;       // distinct keys
-    std::size_t max_key_len = 256;    // longest key, in bytes
-    std::size_t max_value_len = 4096; // longest value, in bytes
-    std::size_t max_updates = 256;    // total set_env calls
-    std::size_t max_threads = 64;     // concurrent per-thread views
-    bool read_process_env = true;     // inherit the process environment
-};
-```
-
-- `set_env` returns `false` when the update budget (`max_updates`), the key
-  space (`max_keys`) or a value length is exceeded — it never throws on the
-  fast path.
-- Values are immutable, so each `set_env` permanently consumes one value cell.
-  Budget accordingly, or reload the module if you need a fresh window.
-- `read_process_env = false` gives a clean, file-only store — handy for tests
-  and for deployments that want the file to be the single source of truth.
-
-Sizing the arena is straightforward: `environment_footprint(config)` returns
-the bytes the module's shard will occupy.
-
-```cpp
-environment::environment_config_t config;
-arena::arena_config_t arena_config;
-arena_config.size = environment::environment_footprint(config) + (64 * 1024);
-arena::arena_t arena{arena_config};
-environment::init(arena, "app.env", config);
-```
-
-## Concurrency
-
-`get_env` is safe to call from any number of threads once the module is
-initialized. `set_env` is safe from multiple threads too: writers are
-serialized, readers stay lock-free. `init` and `shutdown` are not concurrent —
-call them from a single thread, at startup and teardown, with the arena
-outliving every reader and writer.
-
-## The header
-
-```cpp
-#include <frameworkcpp/environment/environment.hpp>
-```
-
-That is the whole module: `init`, `get_env`, `set_env`, `shutdown` and
-`environment_footprint`.
+- [Lifecycle](lifecycle) — `init`, `shutdown`, process-vs-file precedence and the threading rules.
+- [The API](api) — `get_env`, `set_env`, `environment_footprint` and their semantics.
+- [Internals](internals) — the key table, value cells, journal, per-thread views and the version protocol.
+- [Configuration](configuration) — the fixed capacities and how to size the arena.
