@@ -5,8 +5,12 @@ A **shard** is a slice of the arena's memory. Through its view
 that live inside it.
 
 ```cpp
-#include <frameworkcpp/arena/arena.hpp>
+#include <frameworkcpp/arena/arena.hpp>   // to create the shard (arena_t)
 ```
+
+The examples below build an arena, so they need `arena.hpp`. If you are handed
+a shard without building the arena yourself, `arena_shard_t` is in
+`<frameworkcpp/arena/shard.hpp>` on its own.
 
 ## What a shard is
 

@@ -9,8 +9,12 @@ shard, as one `object_spec_t` entry, and you later grab a handle to it with
 `shard.get_bucket(tag, concurrency_model)`.
 
 ```cpp
-#include <frameworkcpp/arena/arena.hpp>
+#include <frameworkcpp/arena/arena.hpp>   // to build the arena + shard in the examples
 ```
+
+The handle itself — `arena_bucket_t` — lives in
+`<frameworkcpp/arena/bucket.hpp>`; include that directly when you receive a
+bucket without building the arena.
 
 ## Declaring a bucket
 

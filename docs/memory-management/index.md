@@ -55,6 +55,25 @@ An arena can be capped. You set a **soft limit** (a warning watermark) and a
 past the hard limit throws `arena_overflow_error` (or aborts, if you configure
 it). See [Configuration](configuration) for the details.
 
+## The headers
+
+The module is split so you include only what you use. Pick the header that
+matches the piece you touch:
+
+| You are using | Include |
+| --- | --- |
+| The arena itself (`arena_t`) and the whole module | `<frameworkcpp/arena/arena.hpp>` |
+| A shard view (`arena_shard_t`) | `<frameworkcpp/arena/shard.hpp>` |
+| A bucket handle (`arena_bucket_t`) | `<frameworkcpp/arena/bucket.hpp>` |
+| Unique pointer (`arena_unique_ptr_t`) | `<frameworkcpp/arena/unique_ptr.hpp>` |
+| Shared pointer (`arena_shared_ptr_t`) | `<frameworkcpp/arena/shared_ptr.hpp>` |
+| Standard allocator / PMR bridge | `<frameworkcpp/arena/arena_allocator.hpp>` |
+| Configuration types only | `<frameworkcpp/arena/config.hpp>` |
+
+`arena.hpp` is the umbrella: it includes everything, so snippets that need to
+*build* an arena (and everything above it) just include it. The granular
+headers matter when the arena already exists and you only touch one piece.
+
 ## The pieces
 
 Read them top to bottom — each page builds on the previous one:

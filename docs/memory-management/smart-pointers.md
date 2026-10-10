@@ -5,7 +5,9 @@ The arena ships two RAII owners that construct the object, run its destructor,
 and hand the block back to the arena — no new, no delete.
 
 ```cpp
-#include <frameworkcpp/arena/arena.hpp>
+#include <frameworkcpp/arena/unique_ptr.hpp>   // arena_unique_ptr_t
+#include <frameworkcpp/arena/shared_ptr.hpp>   // arena_shared_ptr_t + enable_shared_from_this
+#include <frameworkcpp/arena/arena.hpp>        // to build the arena in the examples
 ```
 
 ## Unique ownership

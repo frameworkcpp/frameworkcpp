@@ -5,7 +5,8 @@ The arena talks the standard allocator language, so it can power `std::vector`,
 all backed by arena memory.
 
 ```cpp
-#include <frameworkcpp/arena/arena_allocator.hpp>
+#include <frameworkcpp/arena/arena_allocator.hpp>   // arena_allocator<T> + arena_memory_resource
+#include <frameworkcpp/arena/arena.hpp>             // to build the arena in the examples
 ```
 
 ## The standard allocator

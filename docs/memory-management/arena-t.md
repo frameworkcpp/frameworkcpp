@@ -4,8 +4,11 @@
 shards out of it, and knows how much of your budget you have used.
 
 ```cpp
-#include <frameworkcpp/arena/arena.hpp>
+#include <frameworkcpp/arena/arena.hpp>   // arena_t lives here (and the umbrella)
 ```
+
+The configuration types (`arena_config_t`, `overflow_mode`, ...) arrive through
+the same include; they live on their own in `<frameworkcpp/arena/config.hpp>`.
 
 ## Configuring an arena
 
