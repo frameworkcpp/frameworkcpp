@@ -38,3 +38,60 @@ Checks: >
 HeaderFilterRegex: 'include/frameworkcpp/.*'
 
 FormatStyle: file
+
+# The style in AGENTS.md, enforced mechanically. `readability-identifier-naming`
+# is already on (via `readability-*`); these options give it teeth.
+CheckOptions:
+  readability-identifier-naming.NamespaceCase: lower_case
+
+  readability-identifier-naming.ClassCase: lower_case
+  readability-identifier-naming.ClassSuffix: '_t'
+  readability-identifier-naming.ClassIgnoredRegexp: '.*exception'
+
+  readability-identifier-naming.StructCase: lower_case
+  readability-identifier-naming.StructSuffix: '_t'
+  readability-identifier-naming.StructIgnoredRegexp: '.*exception|rebind'
+
+  readability-identifier-naming.UnionCase: lower_case
+  readability-identifier-naming.UnionSuffix: '_t'
+
+  readability-identifier-naming.EnumCase: lower_case
+  readability-identifier-naming.EnumSuffix: '_t'
+  readability-identifier-naming.EnumConstantCase: lower_case
+  readability-identifier-naming.EnumConstantSuffix: '_'
+
+  readability-identifier-naming.MemberCase: lower_case
+  readability-identifier-naming.MemberSuffix: '_'
+  readability-identifier-naming.StaticMemberCase: lower_case
+  readability-identifier-naming.StaticMemberSuffix: '_'
+
+  readability-identifier-naming.LocalVariableCase: lower_case
+  readability-identifier-naming.LocalVariablePrefix: '_'
+  readability-identifier-naming.LocalConstantCase: lower_case
+  readability-identifier-naming.LocalConstantPrefix: '_'
+  readability-identifier-naming.LocalConstantSuffix: '_k'
+
+  readability-identifier-naming.GlobalConstantCase: lower_case
+  readability-identifier-naming.GlobalConstantSuffix: '_k'
+  readability-identifier-naming.ClassConstantCase: lower_case
+  readability-identifier-naming.ClassConstantSuffix: '_k'
+  readability-identifier-naming.StaticConstantCase: lower_case
+  readability-identifier-naming.StaticConstantSuffix: '_k'
+
+  readability-identifier-naming.ParameterCase: lower_case
+
+  readability-identifier-naming.FunctionCase: lower_case
+  readability-identifier-naming.FunctionIgnoredRegexp: 'operator.*'
+
+  readability-identifier-naming.TypeAliasCase: lower_case
+  readability-identifier-naming.TypeAliasSuffix: '_t'
+  readability-identifier-naming.TypeAliasIgnoredRegexp: '.*_fn|value_type|other'
+  readability-identifier-naming.TypedefCase: lower_case
+  readability-identifier-naming.TypedefSuffix: '_t'
+
+  readability-identifier-naming.TemplateParameterCase: CamelCase
+  readability-identifier-naming.TypeTemplateParameterCase: CamelCase
+  readability-identifier-naming.ValueTemplateParameterCase: CamelCase
+
+  readability-identifier-naming.CXXMethodCase: lower_case
+  readability-identifier-naming.ClassMethodCase: lower_case
