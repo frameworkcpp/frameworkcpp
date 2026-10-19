@@ -276,6 +276,10 @@ body {
     --vp-nav-col-offset: var(--vp-sidebar-width) !important;
   }
 
+  .VPNavBar.has-sidebar .container {
+    max-width: none !important;
+  }
+
   .VPContent.has-sidebar {
     padding-left: calc(var(--vp-sidebar-width) + var(--fc-sidebar-gap)) !important;
     padding-right: var(--fc-sidebar-gap) !important;
