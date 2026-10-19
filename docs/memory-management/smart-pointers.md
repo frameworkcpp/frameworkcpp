@@ -48,9 +48,9 @@ arena_shared_ptr_t<T> make_arena_shared_ptr(arena_shard_t& shard, Args&&... args
 ```
 
 ```cpp
-struct Job : arena_enable_shared_from_this<Job>
+struct job_t : arena_enable_shared_from_this_t<job_t>
 {
-    int id;
+    int id_;
 };
 ```
 
@@ -58,17 +58,17 @@ struct Job : arena_enable_shared_from_this<Job>
 arena_t arena;
 auto shard = arena.create_shard(1, {{0, 128, alignof(std::max_align_t), 16}});
 {
-    auto a = make_arena_shared_ptr<Job>(shard, 42);
-    auto b = a;              // both own the same Job
-}                            // last owner gone → ~Job + back to the arena
+    auto a = make_arena_shared_ptr<job_t>(shard, 42);
+    auto b = a;              // both own the same job
+}                            // last owner gone → ~job_t + back to the arena
 ```
 
 It supports the usual shared semantics — copy, move, reset, `operator->`,
 converting from a derived type — plus `shared_from_this()` when `T` derives
-from `arena_enable_shared_from_this<T>`:
+from `arena_enable_shared_from_this_t<T>`:
 
 ```cpp
-auto a = make_arena_shared_ptr<Job>(shard, 1);
+auto a = make_arena_shared_ptr<job_t>(shard, 1);
 auto b = a->shared_from_this();   // another owner of the same object
 ```
 

@@ -7,7 +7,7 @@ shards out of it, and knows how much of your budget you have used.
 #include <frameworkcpp/arena/arena.hpp>   // arena_t lives here (and the umbrella)
 ```
 
-The configuration types (`arena_config_t`, `overflow_mode`, ...) arrive through
+The configuration types (`arena_config_t`, `overflow_mode_t`, ...) arrive through
 the same include; they live on their own in `<frameworkcpp/arena/config.hpp>`.
 
 ## Configuring an arena
@@ -18,25 +18,26 @@ defaults are sensible for development, and you can tighten them for real-time:
 ```cpp
 arena_config_t config;
 
-config.size        = 1024 * 1024;  // initial region, in bytes
-config.soft_limit  = 0;            // warn when reserved bytes reach this (0 = off)
-config.hard_limit  = 0;            // hard ceiling on reserved bytes (0 = uncapped)
-config.overflow    = overflow_mode::throw_error; // throw, or abort() instead
-config.on_warning  = nullptr;      // callback fired once when soft_limit is crossed
-config.touch_pages = false;        // MAP_POPULATE: commit pages up front
+config.size_        = 1024 * 1024;  // initial region, in bytes
+config.soft_limit_  = 0;            // warn when reserved bytes reach this (0 = off)
+config.hard_limit_  = 0;            // hard ceiling on reserved bytes (0 = uncapped)
+config.overflow_    = overflow_mode_t::throw_error_; // throw, or abort() instead
+config.on_warning_  = nullptr;      // callback fired once when soft_limit is crossed
+config.touch_pages_ = false;        // MAP_POPULATE: commit pages up front
 
 arena_t arena{config};
 ```
 
-- `size` is the first region. The arena may reserve more later, up to
-  `hard_limit`.
-- With `hard_limit = 0` (the default) the arena grows without a ceiling —
+- `size_` is the first region. The arena may reserve more later, up to
+  `hard_limit_`.
+- With `hard_limit_ = 0` (the default) the arena grows without a ceiling —
   handy in development, not what you want for a hard deadline.
-- `soft_limit` and `hard_limit` are enforced on **reserved bytes** (what the
+- `soft_limit_` and `hard_limit_` are enforced on **reserved bytes** (what the
   mmap segments occupy), not on live objects.
-- Crossing the hard limit while carving a shard throws `arena_overflow_error`
-  (or aborts, if `overflow == overflow_mode::abort`). Crossing the soft limit
-  calls `on_warning` once and latches `arena.soft_limit_exceeded()`.
+- Crossing the hard limit while carving a shard throws
+  `arena_overflow_exception` (or aborts, if `overflow_ == overflow_mode_t::abort_`).
+  Crossing the soft limit calls `on_warning_` once and latches
+  `arena.is_soft_limit_exceeded()`.
 
 ## Carving shards
 
@@ -50,8 +51,8 @@ arena_shard_t create_shard(std::uint64_t tag, std::span<const object_spec_t> spe
   enum or named constants so your code reads clearly.
 - `specs` are the **buckets** the shard will hold. `create_shard` reserves the
   whole slice up front (headers, free-list metadata and all the slots).
-- `from(tag)` fetches an existing shard by tag, or an empty (falsy) view when
-  it does not exist.
+- `get_shard(tag)` fetches an existing shard by tag, or an empty (falsy) view
+  when it does not exist.
 
 ## The arena owns, the shard frees
 
@@ -80,13 +81,13 @@ it is still in use.
 ## Knowing the budget
 
 ```cpp
-std::size_t shard_count() const noexcept; // how many shards have been carved
-std::size_t capacity()      const noexcept; // total bytes reserved (all regions)
-std::size_t used()          const noexcept; // bytes carved so far (high-water mark)
-std::size_t live()          const noexcept; // slots currently in your hands
-std::size_t hard_limit()    const noexcept;
-std::size_t soft_limit()    const noexcept;
-bool        soft_limit_exceeded() const noexcept;
+std::size_t get_shard_count() const noexcept; // how many shards have been carved
+std::size_t get_capacity()    const noexcept; // total bytes reserved (all regions)
+std::size_t get_used()        const noexcept; // bytes carved so far (high-water mark)
+std::size_t get_live()        const noexcept; // slots currently in your hands
+std::size_t get_hard_limit()  const noexcept;
+std::size_t get_soft_limit()  const noexcept;
+bool        is_soft_limit_exceeded() const noexcept;
 ```
 
 ## Example
@@ -95,25 +96,25 @@ bool        soft_limit_exceeded() const noexcept;
 using namespace frameworkcpp::arena;
 
 // Tag the shard and the buckets so the numbers mean something.
-enum class shard_tag : std::uint64_t { workers = 1 };
-enum class bucket_tag : std::uint64_t { command = 0, counter = 1 };
+enum class shard_tag : std::uint64_t { workers_ = 1 };
+enum class bucket_tag : std::uint64_t { command_ = 0, counter_ = 1 };
 
 arena_config_t config;
-config.hard_limit = 4 * 1024 * 1024;   // the stock: never reserve past 4 MiB
+config.hard_limit_ = 4 * 1024 * 1024;   // the stock: never reserve past 4 MiB
 arena_t arena{config};
 
 auto workers = arena.create_shard(
-    static_cast<std::uint64_t>(shard_tag::workers),
+    static_cast<std::uint64_t>(shard_tag::workers_),
     {
-        {static_cast<std::uint64_t>(bucket_tag::command),
+        {static_cast<std::uint64_t>(bucket_tag::command_),
          sizeof(std::uint32_t),
          alignof(std::uint32_t),
          512},
-        {static_cast<std::uint64_t>(bucket_tag::counter),
+        {static_cast<std::uint64_t>(bucket_tag::counter_),
          sizeof(std::uint64_t),
          alignof(std::uint64_t),
          512},
     });
 
-std::cout << "reserved: " << arena.capacity() << " bytes\n";
+std::cout << "reserved: " << arena.get_capacity() << " bytes\n";
 ```

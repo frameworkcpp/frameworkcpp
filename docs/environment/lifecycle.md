@@ -20,7 +20,7 @@ void shutdown() noexcept;
 2. Carves a shard out of the arena and lays out the key table, value pool,
    journal and the view storage. If the arena has no room, it throws
    `std::runtime_error` (and `std::invalid_argument` if a capacity is zero).
-3. Loads the **process environment** first (unless `read_process_env` is off).
+3. Loads the **process environment** first (unless `read_process_env_` is off).
 4. Loads the **dotenv file** after, filling only keys that are still unset.
 
 ### Precedence: the process wins
@@ -36,14 +36,14 @@ file "app.env"        ──► inserted second ──► only fills the gaps
 
 `init` ingests **the whole process environment**, not just the keys the file
 mentions. That is convenient but it costs key and value capacity — size
-`max_keys` / `max_value_len` for the host, or set `read_process_env = false`
+`max_keys_` / `max_value_len_` for the host, or set `read_process_env_ = false`
 when you want the file to be the single source of truth.
 
 To add specific defaults without inheriting everything:
 
 ```cpp
 environment_config_t config;
-config.read_process_env = false;         // start from an empty store
+config.read_process_env_ = false;        // start from an empty store
 environment::init(arena, "app.env", config);
 environment::set_env("LOG_LEVEL", "info"); // explicit defaults
 ```
@@ -83,7 +83,7 @@ environment::shutdown();
 | `set_env` | Yes — writers serialize on a short mutex; readers stay lock-free. |
 | `init` / `shutdown` | No — call from a single thread, at startup and teardown. |
 
-Views are per-thread and are drawn from a fixed pool (`max_threads`). A thread
+Views are per-thread and are drawn from a fixed pool (`max_threads_`). A thread
 claims a free slot the first time it touches the store and hands it back when the
 thread exits, so slots are recycled rather than consumed; if every slot is in use
 at once, `get_env` still works by reading the global slot directly (just slower).

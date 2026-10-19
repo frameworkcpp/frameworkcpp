@@ -31,261 +31,263 @@
 
 namespace frameworkcpp::arena {
 class arena_t {
+  friend class arena_shard_t;
+
+  struct shard_entry_t {
+    std::uint64_t tag_;
+    std::uint32_t region_index_;
+    std::uint32_t slice_offset_;
+  }; // struct shard_entry_t
+
+  mutable std::mutex registry_mutex_;
+  arena_config_t config_;
+  std::array<detail::region_t, max_arena_regions_k> regions_ = {};
+  std::array<shard_entry_t, max_arena_shards_k> shards_ = {};
+  std::size_t region_count_ = 0;
+  std::size_t shard_count_ = 0;
+  std::atomic<std::size_t> capacity_{0};
+  std::atomic<std::size_t> used_{0};
+  std::atomic<bool> soft_exceeded_{false};
+
   public:
-    arena_t() = default;
+  arena_t() = default;
 
-    explicit arena_t(const arena_config_t &config) : config_(config) {
-        if (config_.hard_limit != 0 && config_.soft_limit > config_.hard_limit)
-            throw std::invalid_argument("arena soft_limit must not exceed hard_limit");
-        if (config_.max_shards > kMaxArenaShards || config_.max_regions > kMaxArenaRegions)
-            throw std::invalid_argument("arena registry capacity exceeds hard caps");
-    }
+  explicit arena_t(const arena_config_t &config) : config_(config) {
+    if (config_.hard_limit_ != 0 && config_.soft_limit_ > config_.hard_limit_)
+      throw std::invalid_argument("arena soft_limit must not exceed hard_limit");
+    if (config_.max_shards_ > max_arena_shards_k || config_.max_regions_ > max_arena_regions_k)
+      throw std::invalid_argument("arena registry capacity exceeds hard caps");
+  }
 
-    arena_shard_t create_shard(std::uint64_t tag, std::initializer_list<object_spec_t> specs);
-    arena_shard_t create_shard(std::uint64_t tag, std::span<const object_spec_t> specs);
-    arena_shard_t from(std::uint64_t tag) const;
+  arena_shard_t create_shard(std::uint64_t tag, std::initializer_list<object_spec_t> specs);
+  arena_shard_t create_shard(std::uint64_t tag, std::span<const object_spec_t> specs);
+  arena_shard_t get_shard(std::uint64_t tag) const;
 
-    std::size_t shard_count() const noexcept;
-    std::size_t capacity() const noexcept;
-    std::size_t used() const noexcept;
-    std::size_t live() const noexcept;
+  [[nodiscard]] std::size_t get_shard_count() const noexcept;
+  [[nodiscard]] std::size_t get_capacity() const noexcept;
+  [[nodiscard]] std::size_t get_used() const noexcept;
+  [[nodiscard]] std::size_t get_live() const noexcept;
 
-    std::size_t soft_limit() const noexcept { return config_.soft_limit; }
-    std::size_t hard_limit() const noexcept { return config_.hard_limit; }
-    bool soft_limit_exceeded() const noexcept {
-        return soft_exceeded_.load(std::memory_order_relaxed);
-    }
+  [[nodiscard]] std::size_t get_soft_limit() const noexcept { return config_.soft_limit_; }
+  [[nodiscard]] std::size_t get_hard_limit() const noexcept { return config_.hard_limit_; }
+  [[nodiscard]] bool is_soft_limit_exceeded() const noexcept {
+    return soft_exceeded_.load(std::memory_order_relaxed);
+  }
 
   private:
-    friend class arena_shard_t;
-
-    struct shard_entry {
-        std::uint64_t tag;
-        std::uint32_t region_index;
-        std::uint32_t slice_offset;
-    };
-
-    detail::region *region_for(std::size_t bytes);
-    arena_shard_t build_shard(std::uint64_t tag, std::span<const object_spec_t> specs);
-    [[noreturn]] void hard_overflow(std::size_t requested) const;
-    void check_soft_limit() noexcept;
-    std::byte *shard_base_of(std::uint32_t index) const;
-
-    mutable std::mutex registry_mutex_;
-    arena_config_t config_;
-    std::array<detail::region, kMaxArenaRegions> regions_ = {};
-    std::array<shard_entry, kMaxArenaShards> shards_ = {};
-    std::size_t region_count_ = 0;
-    std::size_t shard_count_ = 0;
-    std::atomic<std::size_t> capacity_{0};
-    std::atomic<std::size_t> used_{0};
-    std::atomic<bool> soft_exceeded_{false};
-};
+  detail::region_t *region_for(std::size_t bytes);
+  arena_shard_t build_shard(std::uint64_t tag, std::span<const object_spec_t> specs);
+  [[noreturn]] void hard_overflow(std::size_t requested) const;
+  void check_soft_limit() noexcept;
+  std::byte *get_shard_base(std::uint32_t index) const;
+}; // class arena_t
 
 inline arena_shard_t arena_t::create_shard(std::uint64_t tag,
                                            std::initializer_list<object_spec_t> specs) {
-    return create_shard(tag, std::span<const object_spec_t>(specs.begin(), specs.size()));
+  return create_shard(tag, std::span<const object_spec_t>(specs.begin(), specs.size()));
 }
 
 inline arena_shard_t arena_t::create_shard(std::uint64_t tag,
                                            std::span<const object_spec_t> specs) {
-    const std::lock_guard lock{registry_mutex_};
-    const auto count = shard_count_;
-    for (std::size_t i = 0; i < count; ++i) {
-        if (shards_[i].tag == tag) {
-            arena_shard_t view;
-            view.hdr_ = reinterpret_cast<detail::shard_header *>(shard_base_of(i));
-            return view;
-        }
+  const std::lock_guard _lock_k{registry_mutex_};
+  const auto _count_k = shard_count_;
+  for (std::size_t _index = 0; _index < _count_k; ++_index) {
+    if (shards_[_index].tag_ == tag) {
+      arena_shard_t _view;
+      _view.hdr_ = reinterpret_cast<detail::shard_header_t *>(get_shard_base(_index));
+      return _view;
     }
-    return build_shard(tag, specs);
+  }
+  return build_shard(tag, specs);
 }
 
-inline arena_shard_t arena_t::from(std::uint64_t tag) const {
-    const std::lock_guard lock{registry_mutex_};
-    const auto count = shard_count_;
-    for (std::size_t i = 0; i < count; ++i) {
-        if (shards_[i].tag == tag) {
-            arena_shard_t view;
-            view.hdr_ = reinterpret_cast<detail::shard_header *>(shard_base_of(i));
-            return view;
-        }
+inline arena_shard_t arena_t::get_shard(std::uint64_t tag) const {
+  const std::lock_guard _lock_k{registry_mutex_};
+  const auto _count_k = shard_count_;
+  for (std::size_t _index = 0; _index < _count_k; ++_index) {
+    if (shards_[_index].tag_ == tag) {
+      arena_shard_t _view;
+      _view.hdr_ = reinterpret_cast<detail::shard_header_t *>(get_shard_base(_index));
+      return _view;
     }
-    return arena_shard_t{};
+  }
+  return arena_shard_t{};
 }
 
-inline detail::region *arena_t::region_for(std::size_t bytes) {
-    for (std::size_t i = 0; i < region_count_; ++i) {
-        auto &r = regions_[i];
-        if (r.can_fit(bytes))
-            return &r;
-    }
-    if (region_count_ >= config_.max_regions || region_count_ >= regions_.size())
-        return nullptr;
-    auto budget = std::max(bytes, config_.size);
-    if (config_.hard_limit != 0) {
-        if (bytes > config_.hard_limit)
-            hard_overflow(bytes);
-        const auto reserved = capacity();
-        if (reserved + budget > config_.hard_limit)
-            budget = config_.hard_limit - reserved;
-    }
-    auto &r = regions_[region_count_];
-    const std::size_t page_bytes = detail::align_up(budget, detail::kPageSize);
-    if (!r.reserve(page_bytes, config_.touch_pages))
-        return nullptr;
-    ++region_count_;
-    capacity_.fetch_add(page_bytes, std::memory_order_relaxed);
-    check_soft_limit();
-    return &r;
+inline detail::region_t *arena_t::region_for(std::size_t bytes) {
+  for (std::size_t _index = 0; _index < region_count_; ++_index) {
+    auto &_region = regions_[_index];
+    if (_region.can_fit(bytes))
+      return &_region;
+  }
+  if (region_count_ >= config_.max_regions_ || region_count_ >= regions_.size())
+    return nullptr;
+  auto _budget = std::max(bytes, config_.size_);
+  if (config_.hard_limit_ != 0) {
+    if (bytes > config_.hard_limit_)
+      hard_overflow(bytes);
+    const auto _reserved_k = get_capacity();
+    if (_reserved_k + _budget > config_.hard_limit_)
+      _budget = config_.hard_limit_ - _reserved_k;
+  }
+  auto &_region = regions_[region_count_];
+  const std::size_t _page_bytes_k = detail::align_up(_budget, detail::page_size_k);
+  if (!_region.reserve(_page_bytes_k, config_.touch_pages_))
+    return nullptr;
+  ++region_count_;
+  capacity_.fetch_add(_page_bytes_k, std::memory_order_relaxed);
+  check_soft_limit();
+  return &_region;
 }
 
 [[noreturn]] inline void arena_t::hard_overflow(std::size_t requested) const {
-    if (config_.overflow == overflow_mode::abort)
-        std::abort();
-    throw arena_overflow_error(requested, config_.hard_limit);
+  if (config_.overflow_ == overflow_mode_t::abort_)
+    std::abort();
+  throw arena_overflow_exception(requested, config_.hard_limit_);
 }
 
 inline void arena_t::check_soft_limit() noexcept {
-    if (config_.soft_limit == 0)
-        return;
-    const auto reserved = capacity();
-    if (reserved >= config_.soft_limit &&
-        !soft_exceeded_.exchange(true, std::memory_order_relaxed)) {
-        if (config_.on_warning != nullptr)
-            config_.on_warning("arena soft limit reached");
-    }
+  if (config_.soft_limit_ == 0)
+    return;
+  const auto _reserved_k = get_capacity();
+  if (_reserved_k >= config_.soft_limit_ &&
+      !soft_exceeded_.exchange(true, std::memory_order_relaxed)) {
+    if (config_.on_warning_ != nullptr)
+      config_.on_warning_("arena soft limit reached");
+  }
 }
 
-inline std::byte *arena_t::shard_base_of(std::uint32_t index) const {
-    const auto &entry = shards_[index];
-    return regions_[entry.region_index].base() + entry.slice_offset;
+inline std::byte *arena_t::get_shard_base(std::uint32_t index) const {
+  const auto &_entry = shards_[index];
+  return regions_[_entry.region_index_].get_base() + _entry.slice_offset_;
 }
 
 inline arena_shard_t arena_t::build_shard(std::uint64_t tag, std::span<const object_spec_t> specs) {
-    arena_shard_t view;
-    if (specs.empty())
-        return view;
-    for (const auto &s : specs) {
-        if (!detail::spec_valid(s))
-            return view;
+  arena_shard_t _view;
+  if (specs.empty())
+    return _view;
+  for (const auto &_spec : specs) {
+    if (!detail::is_spec_valid(_spec))
+      return _view;
+  }
+  if (shard_count_ >= config_.max_shards_)
+    return _view;
+  const auto _bytes_k = detail::slice_bytes_runtime(specs);
+  auto *_region = region_for(_bytes_k);
+  if (_region == nullptr)
+    return _view;
+  auto *_slice = _region->take(_bytes_k);
+  if (_slice == nullptr)
+    return _view;
+  used_.fetch_add(_bytes_k, std::memory_order_relaxed);
+
+  const auto _shard_index_k = static_cast<std::uint32_t>(shard_count_);
+  const auto _region_index_k = static_cast<std::uint32_t>(_region - regions_.data());
+  const auto _slice_offset_k = static_cast<std::size_t>(_slice - _region->get_base());
+
+  auto *_header = ::new (static_cast<void *>(_slice)) detail::shard_header_t{};
+  _header->tag_ = tag;
+  _header->shard_id_ = _shard_index_k;
+  _header->bucket_count_ = static_cast<std::uint32_t>(specs.size());
+  _header->slice_bytes_ = _bytes_k;
+
+  auto *_descriptors = reinterpret_cast<detail::bucket_descriptor_t *>(_header + 1);
+  std::size_t _offset = detail::align_up(reinterpret_cast<std::byte *>(_descriptors) - _slice, 8) +
+                        (specs.size() * sizeof(detail::bucket_descriptor_t));
+
+  for (std::size_t _index = 0; _index < specs.size(); ++_index) {
+    auto &_descriptor = _descriptors[_index];
+    _descriptor.tag_ = specs[_index].tag_;
+    _descriptor.object_size_ = specs[_index].object_size_;
+    _descriptor.align_ = specs[_index].align_;
+    _descriptor.stride_ = detail::stride_needed(specs[_index].object_size_, specs[_index].align_);
+    _descriptor.count_ = static_cast<std::uint32_t>(specs[_index].count_);
+    _descriptor.head_ = -1;
+    _descriptor.top_ = 0;
+    _descriptor.model_ = static_cast<std::uint32_t>(concurrency_model_t::single_thread_);
+    _descriptor.shm_ = 0;
+    _descriptor.p_ = 0;
+    _descriptor.c_ = 0;
+    _descriptor.ring_off_ = 0;
+    _descriptor.seq_off_ = 0;
+    _descriptor.in_use_ = 0;
+    _descriptor.freed_ = 0;
+  }
+
+  _offset = detail::align_up(_offset, alignof(std::shared_mutex));
+  for (std::size_t _index = 0; _index < specs.size(); ++_index) {
+    _descriptors[_index].shm_ = _offset + _index * sizeof(std::shared_mutex);
+    ::new (static_cast<void *>(_slice + _descriptors[_index].shm_)) std::shared_mutex;
+  }
+  _offset += specs.size() * sizeof(std::shared_mutex);
+
+  for (std::size_t _index = 0; _index < specs.size(); ++_index) {
+    _descriptors[_index].ring_off_ = _offset;
+    _offset += specs[_index].count_ * sizeof(std::int64_t);
+    _descriptors[_index].seq_off_ = _offset;
+    _offset += specs[_index].count_ * sizeof(std::int64_t);
+  }
+
+  for (std::size_t _index = 0; _index < specs.size(); ++_index) {
+    _offset = detail::align_up(_offset, specs[_index].align_);
+    _descriptors[_index].run_ = static_cast<std::uint32_t>(_offset);
+    _offset += static_cast<std::size_t>(_descriptors[_index].count_) * _descriptors[_index].stride_;
+  }
+
+  // Order descriptors by ascending object_size so allocate_bytes can stop at
+  // the first fit. Descriptors are self-contained (each carries its own run,
+  // mutex, ring and seq offsets), so reordering them keeps the layout intact.
+  for (std::size_t _index = 1; _index < specs.size(); ++_index) {
+    const detail::bucket_descriptor_t _key_k = _descriptors[_index];
+    std::size_t _position = _index;
+    while (_position > 0 && _descriptors[_position - 1].object_size_ > _key_k.object_size_) {
+      _descriptors[_position] = _descriptors[_position - 1];
+      --_position;
     }
-    if (shard_count_ >= config_.max_shards)
-        return view;
-    const auto bytes = detail::slice_bytes_runtime(specs);
-    auto *region = region_for(bytes);
-    if (region == nullptr)
-        return view;
-    auto *slice = region->take(bytes);
-    if (slice == nullptr)
-        return view;
-    used_.fetch_add(bytes, std::memory_order_relaxed);
+    _descriptors[_position] = _key_k;
+  }
 
-    const auto shard_index = static_cast<std::uint32_t>(shard_count_);
-    const auto region_index = static_cast<std::uint32_t>(region - regions_.data());
-    const auto slice_offset = static_cast<std::size_t>(slice - region->base());
+  shards_[shard_count_++] = {tag,
+                             static_cast<std::uint32_t>(_region_index_k),
+                             static_cast<std::uint32_t>(_slice_offset_k)};
 
-    auto *hdr = ::new (static_cast<void *>(slice)) detail::shard_header{};
-    hdr->tag = tag;
-    hdr->shard_id = shard_index;
-    hdr->bucket_count = static_cast<std::uint32_t>(specs.size());
-    hdr->slice_bytes = bytes;
-
-    auto *descs = reinterpret_cast<detail::bucket_descriptor *>(hdr + 1);
-    std::size_t offset = detail::align_up(reinterpret_cast<std::byte *>(descs) - slice, 8) +
-                         (specs.size() * sizeof(detail::bucket_descriptor));
-
-    for (std::size_t i = 0; i < specs.size(); ++i) {
-        auto &d = descs[i];
-        d.tag = specs[i].tag;
-        d.object_size = specs[i].object_size;
-        d.align = specs[i].align;
-        d.stride = detail::stride_needed(specs[i].object_size, specs[i].align);
-        d.count = static_cast<std::uint32_t>(specs[i].count);
-        d.head = -1;
-        d.top = 0;
-        d.model = static_cast<std::uint32_t>(concurrency_model::single_thread);
-        d.shm = 0;
-        d.p = 0;
-        d.c = 0;
-        d.ring_off = 0;
-        d.seq_off = 0;
-        d.in_use = 0;
-        d.freed = 0;
-    }
-
-    offset = detail::align_up(offset, alignof(std::shared_mutex));
-    for (std::size_t i = 0; i < specs.size(); ++i) {
-        descs[i].shm = offset + i * sizeof(std::shared_mutex);
-        ::new (static_cast<void *>(slice + descs[i].shm)) std::shared_mutex;
-    }
-    offset += specs.size() * sizeof(std::shared_mutex);
-
-    for (std::size_t i = 0; i < specs.size(); ++i) {
-        descs[i].ring_off = offset;
-        offset += specs[i].count * sizeof(std::int64_t);
-        descs[i].seq_off = offset;
-        offset += specs[i].count * sizeof(std::int64_t);
-    }
-
-    for (std::size_t i = 0; i < specs.size(); ++i) {
-        offset = detail::align_up(offset, specs[i].align);
-        descs[i].run = static_cast<std::uint32_t>(offset);
-        offset += static_cast<std::size_t>(descs[i].count) * descs[i].stride;
-    }
-
-    // Order descriptors by ascending object_size so allocate_bytes can stop at
-    // the first fit. Descriptors are self-contained (each carries its own run,
-    // mutex, ring and seq offsets), so reordering them keeps the layout intact.
-    for (std::size_t i = 1; i < specs.size(); ++i) {
-        const detail::bucket_descriptor key = descs[i];
-        std::size_t j = i;
-        while (j > 0 && descs[j - 1].object_size > key.object_size) {
-            descs[j] = descs[j - 1];
-            --j;
-        }
-        descs[j] = key;
-    }
-
-    shards_[shard_count_++] = {
-        tag, static_cast<std::uint32_t>(region_index), static_cast<std::uint32_t>(slice_offset)};
-
-    view.hdr_ = hdr;
-    return view;
+  _view.hdr_ = _header;
+  return _view;
 }
 
-inline std::size_t arena_t::shard_count() const noexcept {
-    const std::lock_guard lock{registry_mutex_};
-    return shard_count_;
+inline std::size_t arena_t::get_shard_count() const noexcept {
+  const std::lock_guard _lock_k{registry_mutex_};
+  return shard_count_;
 }
 
-inline std::size_t arena_t::capacity() const noexcept {
-    return capacity_.load(std::memory_order_acquire);
+inline std::size_t arena_t::get_capacity() const noexcept {
+  return capacity_.load(std::memory_order_acquire);
 }
 
 // High-water mark of the bytes carved out of the regions. The arena never
 // returns memory to a region, so this only grows.
-inline std::size_t arena_t::used() const noexcept {
-    return used_.load(std::memory_order_acquire);
+inline std::size_t arena_t::get_used() const noexcept {
+  return used_.load(std::memory_order_acquire);
 }
 
-inline std::size_t arena_t::live() const noexcept {
-    const std::lock_guard lock{registry_mutex_};
-    std::size_t total = 0;
-    for (std::size_t i = 0; i < shard_count_; ++i) {
-        const auto &entry = shards_[i];
-        auto *slice = regions_[entry.region_index].base() + entry.slice_offset;
-        auto *shard_hdr = reinterpret_cast<detail::shard_header *>(slice);
-        auto *descs = reinterpret_cast<detail::bucket_descriptor *>(shard_hdr + 1);
-        for (std::uint32_t b = 0; b < shard_hdr->bucket_count; ++b) {
-            auto &d = descs[b];
-            if (static_cast<concurrency_model>(d.model) == concurrency_model::single_thread)
-                total += static_cast<std::size_t>(d.in_use);
-            else
-                total += static_cast<std::size_t>(
-                    std::atomic_ref<const std::int64_t>(d.in_use).load(std::memory_order_relaxed));
-        }
+inline std::size_t arena_t::get_live() const noexcept {
+  const std::lock_guard _lock_k{registry_mutex_};
+  std::size_t _total = 0;
+  for (std::size_t _index = 0; _index < shard_count_; ++_index) {
+    const auto &_entry = shards_[_index];
+    auto *_slice = regions_[_entry.region_index_].get_base() + _entry.slice_offset_;
+    auto *_shard_header = reinterpret_cast<detail::shard_header_t *>(_slice);
+    auto *_descriptors = reinterpret_cast<detail::bucket_descriptor_t *>(_shard_header + 1);
+    for (std::uint32_t _bucket = 0; _bucket < _shard_header->bucket_count_; ++_bucket) {
+      auto &_descriptor = _descriptors[_bucket];
+      if (static_cast<concurrency_model_t>(_descriptor.model_) ==
+          concurrency_model_t::single_thread_)
+        _total += static_cast<std::size_t>(_descriptor.in_use_);
+      else
+        _total += static_cast<std::size_t>(std::atomic_ref<const std::int64_t>(_descriptor.in_use_)
+                                               .load(std::memory_order_relaxed));
     }
-    return total;
+  }
+  return _total;
 }
 } // namespace frameworkcpp::arena
