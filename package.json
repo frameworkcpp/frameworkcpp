@@ -1,6 +1,8 @@
 {
   "devDependencies": {
-    "vitepress": "^2.0.0-alpha.20"
+    "mermaid": "^12.2.0",
+    "vitepress": "^2.0.0-alpha.20",
+    "vitepress-mermaid-renderer": "^1.2.2"
   },
   "scripts": {
     "docs:dev": "vitepress dev docs",
