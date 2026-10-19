@@ -1,8 +1,9 @@
 # Configuration
 
-The Environment Management module is sized up front. You hand `init` an
-`environment_config_t` and it carves a shard with exactly those capacities —
-there is nothing to grow and nothing to `malloc` afterwards.
+The store is sized up front. You hand `init` an `environment_config_t` and it
+carves a shard with exactly those capacities — there is nothing to grow and
+nothing to `malloc` afterwards. This page explains each knob and how to derive
+the arena budget from them.
 
 ```cpp
 #include <frameworkcpp/environment/environment.hpp>
@@ -39,8 +40,8 @@ retired it. So the number of writes is **not** a budget — only the memory is:
 
 - `value_cells_` must hold the keys you have plus the cells retired but not yet
   recycled. In steady state that is small: a handful of updates in flight.
-- `journal_size_` is how far behind a reader may drift before it reseeds from the
-  global slots instead of replaying the delta ring.
+- `journal_size_` is how far behind a reader may drift before it reseeds from
+  the global slots instead of replaying the delta ring.
 
 A writer only fails when the pool is momentarily exhausted — which happens when
 a live view stops advancing and pins every retired cell. That is the bounded
@@ -70,8 +71,9 @@ arena::arena_t arena{environment::get_environment_arena_config(env_k)};
 environment::init(arena, "app.env", env_k);
 ```
 
-`get_environment_arena_bytes(config, extra)` is `round_to_page(footprint + extra)`,
-so pass any headroom you want for other shards as `extra`.
+`get_environment_arena_bytes(config, extra)` is
+`round_to_page(footprint + extra)`, so pass any headroom you want for other
+shards as `extra`.
 
 ## Suggested configurations
 

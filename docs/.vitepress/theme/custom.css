@@ -1,7 +1,7 @@
 /*
  * SPDX-License-Identifier: AGPL-3.0-only
  *
- * FrameworkCpp docs theme.
+ * FrameworkCpp docs theme — editorial, minimal, distraction-free.
  */
 
 /* ------------------------------------------------------------------ */
@@ -13,9 +13,21 @@
     'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif,
     'Apple Color Emoji', 'Segoe UI Emoji', 'Segoe UI Symbol', 'Noto Color Emoji';
   --vp-font-family-mono:
-    'JetBrains Mono', ui-monospace, 'Menlo', 'Monaco', 'Consolas',
-    'Liberation Mono', 'Courier New', monospace;
-  --vp-layout-max-width: 86rem;
+    'JetBrains Mono', ui-monospace, 'SFMono-Regular', 'Menlo', 'Monaco',
+    'Consolas', 'Liberation Mono', 'Courier New', monospace;
+  --vp-font-family-heading: 'Roboto Slab', 'Inter', Georgia, serif;
+
+  --vp-layout-max-width: 88rem;
+  --vp-sidebar-width: 19rem;
+
+  /* Reading rhythm */
+  --fc-prose-size: 16px;
+  --fc-prose-leading: 1.7;
+  --fc-sidebar-gap: 2.5rem;
+
+  /* Inline code */
+  --fc-code-radius: 6px;
+  --fc-code-block-padding: 1.35rem 1.5rem;
 }
 
 /* ------------------------------------------------------------------ */
@@ -29,9 +41,9 @@
   --vp-c-brand-soft: rgba(20, 184, 166, 0.16);
 
   --vp-c-bg: #ffffff;
-  --vp-c-bg-alt: #f6f6f4;
+  --vp-c-bg-alt: #f7f7f5;
   --vp-c-bg-elv: #ffffff;
-  --vp-c-bg-soft: #f6f6f4;
+  --vp-c-bg-soft: #f7f7f5;
 
   --vp-c-divider: #e8e8e3;
   --vp-c-border: #d0d0ca;
@@ -39,6 +51,12 @@
   --vp-c-text-1: #2b2b31;
   --vp-c-text-2: #5d6167;
   --vp-c-text-3: #8a8d92;
+
+  --vp-code-block-bg: #f6f7f7;
+
+  --fc-inline-code-bg: #f3f5f5;
+  --fc-inline-code-border: #e4e7e7;
+  --fc-inline-code-color: #0b5c56;
 }
 
 /* ------------------------------------------------------------------ */
@@ -62,6 +80,12 @@
   --vp-c-text-1: #e8e8e2;
   --vp-c-text-2: #9aa0a6;
   --vp-c-text-3: #636a70;
+
+  --vp-code-block-bg: #0f1114;
+
+  --fc-inline-code-bg: rgba(94, 234, 212, 0.07);
+  --fc-inline-code-border: rgba(94, 234, 212, 0.16);
+  --fc-inline-code-color: #7dd3c8;
 }
 
 /* ------------------------------------------------------------------ */
@@ -69,7 +93,6 @@
 /* ------------------------------------------------------------------ */
 
 :root {
-  --vp-sidebar-width: 18rem;
   --vp-nav-bg-color: rgba(255, 255, 255, 0.72);
   --vp-nav-home-bg-color: transparent;
   --vp-nav-backdrop-filter: saturate(180%) blur(12px);
@@ -77,6 +100,240 @@
 
 .dark {
   --vp-nav-bg-color: rgba(20, 22, 25, 0.72);
+}
+
+/* ------------------------------------------------------------------ */
+/* Base text                                                           */
+/* ------------------------------------------------------------------ */
+
+body {
+  font-weight: 300;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+/* Keep interface chrome a touch heavier than prose. */
+.VPNav,
+.VPSidebar,
+.VPLocalNav,
+.VPDocAside {
+  font-weight: 400;
+}
+
+/* ------------------------------------------------------------------ */
+/* Prose                                                               */
+/* ------------------------------------------------------------------ */
+
+.vp-doc {
+  font-size: var(--fc-prose-size);
+  line-height: var(--fc-prose-leading);
+  font-weight: 300;
+  color: var(--vp-c-text-1);
+}
+
+.vp-doc p,
+.vp-doc li {
+  line-height: var(--fc-prose-leading);
+}
+
+.vp-doc p {
+  margin: 1.1rem 0;
+}
+
+.vp-doc h1,
+.vp-doc h2,
+.vp-doc h3,
+.vp-doc h4,
+.vp-doc h5,
+.vp-doc h6 {
+  font-family: var(--vp-font-family-heading);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--vp-c-text-1);
+}
+
+.vp-doc h1 {
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.vp-doc h2 {
+  margin-top: 3rem;
+  padding-top: 1.6rem;
+}
+
+.vp-doc h3 {
+  margin-top: 2.2rem;
+}
+
+/* ------------------------------------------------------------------ */
+/* Inline code                                                         */
+/* ------------------------------------------------------------------ */
+
+.vp-doc :not(pre) > code {
+  font-family: var(--vp-font-family-mono);
+  font-size: 0.86em;
+  font-weight: 400;
+  padding: 0.15em 0.42em;
+  border: 1px solid var(--fc-inline-code-border);
+  border-radius: 5px;
+  background: var(--fc-inline-code-bg);
+  color: var(--fc-inline-code-color);
+  white-space: nowrap;
+}
+
+/* Inline code inside links keeps the link's colour. */
+.vp-doc a > code {
+  color: inherit;
+}
+
+/* ------------------------------------------------------------------ */
+/* Code blocks                                                         */
+/* ------------------------------------------------------------------ */
+
+.vp-doc div[class*='language-'] {
+  border: 1px solid var(--vp-c-divider);
+  border-radius: var(--fc-code-radius);
+  background: var(--vp-code-block-bg);
+}
+
+.vp-doc div[class*='language-'] pre {
+  padding: var(--fc-code-block-padding);
+}
+
+.vp-doc [class*='language-'] code {
+  font-family: var(--vp-font-family-mono);
+  font-size: 14px;
+  line-height: 1.65;
+  font-weight: 400;
+}
+
+.vp-doc [class*='language-'] > span.lang {
+  font-size: 12px;
+  letter-spacing: 0.02em;
+  color: var(--vp-c-text-3);
+}
+
+/* ------------------------------------------------------------------ */
+/* Callouts                                                            */
+/* ------------------------------------------------------------------ */
+
+.vp-doc .custom-block {
+  border: 1px solid var(--vp-c-divider);
+  border-left: 3px solid var(--vp-c-brand-1);
+  border-radius: var(--fc-code-radius);
+  background: var(--vp-c-bg-soft);
+  padding: 0.95rem 1.15rem;
+}
+
+.vp-doc .custom-block .custom-block-title {
+  font-weight: 600;
+}
+
+.vp-doc .custom-block.tip {
+  border-left-color: var(--vp-c-tip-1);
+}
+
+.vp-doc .custom-block.info {
+  border-left-color: var(--vp-c-default-1);
+}
+
+.vp-doc .custom-block.warning {
+  border-left-color: var(--vp-c-warning-1);
+}
+
+.vp-doc .custom-block.danger {
+  border-left-color: var(--vp-c-danger-1);
+}
+
+/* Plain blockquotes (e.g. incidental notes) get the same accent. */
+.vp-doc blockquote {
+  border-left: 3px solid var(--vp-c-divider);
+  padding: 0.1rem 0 0.1rem 1rem;
+  color: var(--vp-c-text-2);
+}
+
+/* ------------------------------------------------------------------ */
+/* Layout & spacing                                                    */
+/* ------------------------------------------------------------------ */
+
+.VPDoc {
+  padding-top: 3rem !important;
+  padding-bottom: 6rem !important;
+}
+
+@media (min-width: 960px) {
+  /* Left-aligned, full-width layout: the sidebar is pinned to the edge and the
+     article fills everything that is left. Nothing is centred against
+     --vp-layout-max-width. */
+  .VPSidebar {
+    padding-left: 2rem !important;
+    width: var(--vp-sidebar-width) !important;
+  }
+
+  .VPNavBar.has-sidebar {
+    --vp-nav-col-offset: var(--vp-sidebar-width) !important;
+  }
+
+  .VPNavBar.has-sidebar .container {
+    max-width: none !important;
+  }
+
+  .VPContent.has-sidebar {
+    padding-left: calc(var(--vp-sidebar-width) + var(--fc-sidebar-gap)) !important;
+    padding-right: var(--fc-sidebar-gap) !important;
+  }
+
+  .VPDoc {
+    padding-left: 0 !important;
+    padding-right: 0 !important;
+  }
+
+  .VPDoc .content-container,
+  .VPDoc.has-aside .content-container {
+    max-width: none !important;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Sidebar                                                             */
+/* ------------------------------------------------------------------ */
+
+.VPSidebar {
+  padding-top: 1.75rem;
+}
+
+.VPSidebarItem .link {
+  padding-top: 5px;
+  padding-bottom: 5px;
+}
+
+.VPSidebarItem .text {
+  line-height: 1.6;
+}
+
+.VPSidebarItem.level-0 > .item > .text,
+.VPSidebarItem.level-0 > .item > .link > .text {
+  font-weight: 600;
+}
+
+.VPSidebarItem.level-1 .link {
+  padding-top: 4px;
+  padding-bottom: 4px;
+}
+
+/* ------------------------------------------------------------------ */
+/* Tables                                                              */
+/* ------------------------------------------------------------------ */
+
+.vp-doc table {
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.vp-doc tr:nth-child(2n) {
+  background: var(--vp-c-bg-soft);
 }
 
 /* ------------------------------------------------------------------ */
@@ -118,34 +375,13 @@
 }
 
 /* ------------------------------------------------------------------ */
-/* Code                                                                */
-/* ------------------------------------------------------------------ */
-
-.vp-doc div[class*='language-'] {
-  border: 1px solid var(--vp-c-divider);
-  border-radius: 12px;
-}
-
-/* ------------------------------------------------------------------ */
-/* Custom blocks & tables                                              */
-/* ------------------------------------------------------------------ */
-
-.custom-block {
-  border-radius: 10px;
-}
-
-.custom-block.tip {
-  border: 1px solid var(--vp-c-tip-soft);
-}
-
-.vp-doc table {
-  border-radius: 10px;
-  overflow: hidden;
-}
-
-/* ------------------------------------------------------------------ */
 /* Details                                                             */
 /* ------------------------------------------------------------------ */
+
+.vp-doc a {
+  font-weight: 400;
+  text-underline-offset: 2px;
+}
 
 .vp-doc a:hover {
   text-decoration-thickness: 1.5px;

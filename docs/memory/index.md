@@ -1,10 +1,13 @@
-# Memory Management
+# Memory
 
-Real-time systems cannot afford a `malloc` here and there, a lock under
-contention, or memory that appears and disappears without a plan.
-`frameworkcpp::arena` is the framework's answer: all blocks come from
-pre-reserved `mmap` segments, freed blocks are recycled into the arena, and the
-fast paths never take a lock. The whole module is header-only.
+A real-time system cannot afford a `malloc` here and there, a lock that stalls
+under contention, or memory that appears and disappears without a plan. Every
+one of those is a source of latency you cannot bound.
+
+`frameworkcpp::arena` is the framework's answer. It reserves memory up front
+with `mmap`, hands it out in slices, and recycles freed blocks back into the
+arena — so the hot paths never allocate and never take a lock. The whole module
+is header-only.
 
 ## The vocabulary
 
@@ -13,14 +16,18 @@ Four words explain the entire module:
 | Concept | What it is |
 | --- | --- |
 | **Arena** | The owner of all the memory. It reserves one or more `mmap` segments and carves shards out of them. The arena knows the budget. |
-| **Shard** | A contiguous slice of the arena's memory, identified by a tag. Only the slices' contents belong to the shard. |
+| **Shard** | A contiguous slice of the arena's memory, identified by a tag. Only the slice's contents belong to the shard. |
 | **Bucket** | A pool of same-size slots inside a shard, identified by a tag. All its slots share one size and one alignment. |
 | **Slot** | One block of memory inside a bucket. Allocating hands you a slot; freeing returns it. |
 
-```
-mmap ─► [ region 0 ][ region 1 (only if it grows) ]...
-            └─ [ shard A ][ shard B ][ ... ]          every shard = one slice
-                   └─ [ bucket: many slots of the same size ]
+```mermaid
+flowchart TD
+    arena["arena — one or more mmap segments"] --> r0["region 0"]
+    arena --> r1["region 1 — only if it grows"]
+    r0 --> sa["shard A — tag 1, one contiguous slice"]
+    r0 --> sb["shard B — tag 2, another slice"]
+    sa --> bucket["bucket — many slots of one size"]
+    bucket --> slot["slot — one block, what allocate hands you"]
 ```
 
 ## The mental model
@@ -34,26 +41,27 @@ mmap ─► [ region 0 ][ region 1 (only if it grows) ]...
 4. You allocate **slots** from buckets; when you free a slot it goes back to
    its bucket for reuse. Nothing is returned to the OS until the arena dies.
 
-## Concurrency
+## Concurrency is a per-bucket choice
 
-Whether a bucket is safe to share is a decision you make per bucket. When you
-ask for a bucket handle you pick the concurrency model:
+Whether a bucket is safe to share is a decision you make when you grab its
+handle. You pick one of three models:
 
 | Model | What it means | Cost |
 | --- | --- | --- |
 | Single-thread | One thread owns the bucket end to end. | nothing — plain fields |
-| Lock-free | Several threads allocate/free the bucket without locks. | atomics only |
+| Lock-free | Several threads allocate/free without locks. | atomics only |
 | Thread-safe | Safe from anywhere without thinking. | a shared mutex |
 
-The model is fixed the first time the bucket is used. Asking for a different
-one later aborts the program.
+The model is fixed the first time the bucket is used. Asking for a different one
+later aborts the program — the choice is not a per-call detail, it is part of
+the bucket's contract.
 
 ## The budget
 
 An arena can be capped. You set a **soft limit** (a warning watermark) and a
 **hard limit** (the hard ceiling). Growing past the soft limit warns; growing
-past the hard limit throws `arena_overflow_exception` (or aborts, if you configure
-it). See [Configuration](configuration) for the details.
+past the hard limit throws `arena_overflow_exception` (or aborts, if you
+configure it). See [Configuration](configuration) for the details.
 
 ## The headers
 
@@ -71,8 +79,8 @@ matches the piece you touch:
 | Configuration types only | `<frameworkcpp/arena/config.hpp>` |
 
 `arena.hpp` is the umbrella: it includes everything, so snippets that need to
-*build* an arena (and everything above it) just include it. The granular
-headers matter when the arena already exists and you only touch one piece.
+*build* an arena just include it. The granular headers matter when the arena
+already exists and you only touch one piece.
 
 ## The pieces
 

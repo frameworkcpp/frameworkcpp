@@ -72,7 +72,8 @@ namespace that spans more than a few lines closes with a `// class x_t` or
    concurrency.
 3. Format: `cmake --build --preset debug --target format`; clean `clang-tidy` on
    changed TU's (naming is enforced by `readability-identifier-naming`).
-4. Update the human-friendly docs in `docs/` whenever public API changes.
+4. Update the human-friendly docs in `docs/` whenever public API changes, and
+   follow `docs/contribute/documentation.md` whenever you write or edit them.
 5. Follow conventional commits: `feat(scope):`, `fix(scope):`,
    `docs(scope):`, `refactor(scope):`, `ci(scope):`, `test(scope):`.
 
