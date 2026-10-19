@@ -511,6 +511,37 @@ struct environment_stats_t {
     return stats;
 }
 
+// One key/value pair as seen through the store's key table. Both views point
+// straight at immutable arena cells and stay valid while the module lives and
+// the entry is not overwritten by a later set_env (which republishes the value
+// view, never the key view).
+struct environment_entry_t {
+    std::string_view key;
+    std::string_view value;
+};
+
+// Copy up to `capacity` entries into `out` and return how many were written.
+// This is an introspection helper, not a hot path: it walks the whole key table,
+// so a real-time loop should still know its keys by name. Returns 0 when the
+// module is uninitialized or `out` is null.
+[[nodiscard]] inline std::size_t environment_keys(environment_entry_t *out,
+                                                  std::size_t capacity) noexcept {
+    auto *control = detail::control_ref();
+    if (control == nullptr || out == nullptr)
+        return 0;
+    std::size_t written = 0;
+    for (std::size_t i = 0; i < control->slots && written < capacity; ++i) {
+        const detail::key_cell_t *key = control->key_table[i].load(std::memory_order_acquire);
+        if (key == nullptr)
+            continue;
+        const detail::value_cell_t *value = control->global[i].load(std::memory_order_acquire);
+        out[written].key = {detail::key_bytes(key), key->len};
+        out[written].value = value != nullptr ? detail::as_view(value) : std::string_view{};
+        ++written;
+    }
+    return written;
+}
+
 // Read a key. On the fast path this only compares the thread's cached version
 // with the global counter; a behind thread replays the delta ring, and a thread
 // that fell past the ring reseeds from the global slots. The returned view is

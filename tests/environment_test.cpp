@@ -209,6 +209,40 @@ TEST_F(EnvironmentTest, BudgetIsConstexpr) {
     EXPECT_EQ(get_env("FC_BUDGET", ""), "ok");
 }
 
+TEST_F(EnvironmentTest, EnumeratesKeys) {
+    environment_config_t config;
+    config.read_process_env = false;
+    config.max_keys = 8;
+    auto arena = make_arena();
+    init(arena, nullptr, config);
+    ASSERT_TRUE(set_env("FC_A", "1"));
+    ASSERT_TRUE(set_env("FC_B", "2"));
+
+    environment_entry_t entries[4] = {};
+    const auto count = environment_keys(entries, 4);
+    ASSERT_EQ(count, 2U);
+    std::string seen;
+    for (std::size_t i = 0; i < count; ++i)
+        seen += std::string(entries[i].key) + "=" + std::string(entries[i].value) + ";";
+    EXPECT_NE(seen.find("FC_A=1;"), std::string::npos);
+    EXPECT_NE(seen.find("FC_B=2;"), std::string::npos);
+}
+
+TEST_F(EnvironmentTest, EnumerateRespectsCapacityAndNull) {
+    environment_config_t config;
+    config.read_process_env = false;
+    config.max_keys = 8;
+    auto arena = make_arena();
+    init(arena, nullptr, config);
+    ASSERT_TRUE(set_env("FC_X", "1"));
+    ASSERT_TRUE(set_env("FC_Y", "2"));
+    ASSERT_TRUE(set_env("FC_Z", "3"));
+
+    environment_entry_t one[1] = {};
+    EXPECT_EQ(environment_keys(one, 1), 1U);
+    EXPECT_EQ(environment_keys(nullptr, 4), 0U);
+}
+
 TEST_F(EnvironmentTest, StatsReportUsage) {
     environment_config_t config;
     config.read_process_env = false;
