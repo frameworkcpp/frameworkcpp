@@ -15,6 +15,13 @@ TEST(ArenaAllocator, SatisfiesStdAllocatorTraits) {
     static_assert(std::is_same_v<std::allocator_traits<arena_allocator<int>>::value_type, int>);
     static_assert(
         std::is_same_v<arena_allocator<int>::rebind<double>::other, arena_allocator<double>>);
+    static_assert(!arena_allocator<int>::propagate_on_container_copy_assignment::value);
+    static_assert(!arena_allocator<int>::propagate_on_container_move_assignment::value);
+    static_assert(!arena_allocator<int>::propagate_on_container_swap::value);
+    static_assert(!arena_allocator<int>::is_always_equal::value);
+    static_assert(std::is_same_v<decltype(std::declval<const arena_allocator<int> &>()
+                                              .select_on_container_copy_construction()),
+                                 arena_allocator<int>>);
 }
 
 TEST(ArenaAllocator, PowersStdVector) {
@@ -39,8 +46,20 @@ TEST(ArenaAllocator, AllocatorsFromSameShardAreEqual) {
     EXPECT_TRUE(a == b);
     EXPECT_TRUE(a == c);
     const arena_allocator<int> empty;
-    EXPECT_FALSE(empty == empty);
+    EXPECT_TRUE(empty == empty);
     EXPECT_FALSE(empty == a);
+    EXPECT_FALSE(a == empty);
+}
+
+TEST(ArenaAllocator, EmptyAllocatorDiffersFromShardZeroAllocator) {
+    arena_t arena;
+    auto shard = arena.create_shard(1, {{0, 64, 8, 64}});
+    const arena_allocator<int> first_shard{shard};
+    ASSERT_EQ(shard.shard_id(), 0U);
+    const arena_allocator<int> empty;
+    EXPECT_FALSE(first_shard == empty);
+    EXPECT_FALSE(empty == first_shard);
+    EXPECT_NE(first_shard, empty);
 }
 
 TEST(ArenaAllocator, PmrVectorRunsOnArenaResource) {

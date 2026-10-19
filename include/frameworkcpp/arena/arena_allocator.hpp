@@ -34,10 +34,28 @@ template <typename T> class arena_allocator {
         using other = arena_allocator<U>;
     };
 
+    // Standard allocator traits. Shard-backed allocators are interchangeable
+    // only when they share a shard, so is_always_equal is false.
+    using propagate_on_container_copy_assignment = std::false_type;
+    using propagate_on_container_move_assignment = std::false_type;
+    using propagate_on_container_swap = std::false_type;
+    using is_always_equal = std::false_type;
+
+    [[nodiscard]] arena_allocator select_on_container_copy_construction() const noexcept {
+        return *this;
+    }
+
     template <typename U> friend class arena_allocator;
 
+    // Two empty (default-constructed) allocators compare equal; a shard-backed
+    // allocator equals only another allocator over the same shard. An empty
+    // allocator is never equal to a shard-backed one.
     bool operator==(const arena_allocator &other) const noexcept {
-        return static_cast<bool>(shard_) && other.shard_.shard_id() == shard_.shard_id();
+        const bool self = static_cast<bool>(shard_);
+        const bool that = static_cast<bool>(other.shard_);
+        if (!self && !that)
+            return true;
+        return self && that && shard_.shard_id() == other.shard_.shard_id();
     }
 
     bool operator!=(const arena_allocator &other) const noexcept { return !(*this == other); }
