@@ -137,18 +137,24 @@ inline std::byte *payload_of(std::byte *b, const bucket_descriptor &d) {
     return b + head_spacing(d.align);
 }
 
-inline std::byte *block_of_payload(std::byte *p) {
-    if (p == nullptr)
+// The anchor lives in the 8 bytes just before the payload and holds the block's
+// offset from the base of its slice. Storing an offset (never a pointer) keeps
+// the scheme correct on any pointer width and lets the caller bound-check it.
+inline std::byte *block_of_payload(std::byte *slice, std::byte *payload) {
+    if (payload == nullptr)
         return nullptr;
-    std::int64_t base = 0;
-    __builtin_memcpy(&base, p - 8, sizeof(base));
-    // NOLINTNEXTLINE(performance-no-int-to-ptr) -- builtin anchor stores a raw address
-    return reinterpret_cast<std::byte *>(base);
+    std::uint64_t offset = 0;
+    __builtin_memcpy(&offset, payload - 8, sizeof(offset));
+    return slice + offset;
 }
 
-inline void store_anchor(std::byte *p, std::byte *b) {
-    auto v = reinterpret_cast<std::int64_t>(b);
-    __builtin_memcpy(p - 8, &v, sizeof(v));
+inline void store_anchor(std::byte *slice, std::byte *payload, std::byte *block) {
+    const auto offset = static_cast<std::uint64_t>(block - slice);
+    __builtin_memcpy(payload - 8, &offset, sizeof(offset));
+}
+
+inline bool valid_block_index(const bucket_descriptor &d, std::int64_t index) {
+    return index >= 0 && index < static_cast<std::int64_t>(d.count);
 }
 
 inline std::shared_mutex &shard_mutex(std::byte *base, const bucket_descriptor &d) {
@@ -291,7 +297,7 @@ take_block(std::byte *slice, bucket_descriptor &d, std::uint32_t bucket, std::ui
     hdr.shard = shard;
     __builtin_memcpy(b, &hdr, sizeof(hdr));
     auto *payload = payload_of(b, d);
-    store_anchor(payload, b);
+    store_anchor(slice, payload, b);
     return payload;
 }
 

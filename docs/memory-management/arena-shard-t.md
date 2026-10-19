@@ -69,10 +69,15 @@ void deallocate(T* p) noexcept;
 void deallocate_bytes(void* p) noexcept;
 ```
 
-A small header sits right before every slot, so the shard knows instantly which
-bucket a pointer belongs to and pushes it back onto that bucket's free-list.
-Foreign pointers are ignored. If you are unsure whether a pointer belongs to
-this shard, use `arena.deallocate` instead.
+Each slot carries a small header that records which bucket owns it, so the shard
+pushes the slot back onto that bucket's free-list. The header stores the owning
+block as an **offset** from the shard's base rather than a raw pointer, so the
+metadata stays valid wherever the region is mapped.
+
+Free through the shard that handed out the slot. A pointer that does not belong
+to this shard (including one from a different shard) is ignored, not freed:
+there is deliberately no cross-shard `deallocate`, since that would need a
+global owner lookup.
 
 ## Grabbing a bucket directly
 

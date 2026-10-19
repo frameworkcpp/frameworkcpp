@@ -82,16 +82,21 @@ struct retired_t {
     std::uint64_t retired_version;
 };
 
-// Per-thread cache, indexed by key-table slot id. `published` and `active` are
-// touched from other threads (the reclaimer) through std::atomic_ref; the rest
-// is thread-private.
+// Per-thread cache. `published` and `active` are touched from other threads (the
+// reclaimer) through std::atomic_ref; the rest is thread-private. The cache is a
+// trailing array of `value_cell_t*` (one per key-table slot) that follows this
+// header in memory and is reached through cached_slots(); it is not declared as
+// a member because a trailing [0]/[1] array is not standard C++20.
 struct view_t {
     std::uint64_t my_version;
     std::uint64_t published;
     std::uint32_t active;
     std::uint32_t pad;
-    value_cell_t *cached[1];
 };
+
+inline value_cell_t **cached_slots(view_t *view) noexcept {
+    return reinterpret_cast<value_cell_t **>(view + 1);
+}
 
 inline const char *key_bytes(const key_cell_t *cell) {
     return reinterpret_cast<const char *>(cell + 1);
@@ -118,8 +123,7 @@ constexpr std::size_t value_object_bytes(std::size_t max_value_len) {
 }
 
 constexpr std::size_t view_object_bytes(std::size_t slots) {
-    return align_up(offsetof(view_t, cached) + (slots * sizeof(value_cell_t *)),
-                    alignof(std::uint64_t));
+    return align_up(sizeof(view_t) + (slots * sizeof(value_cell_t *)), alignof(std::uint64_t));
 }
 
 inline std::string_view as_view(const value_cell_t *cell) {

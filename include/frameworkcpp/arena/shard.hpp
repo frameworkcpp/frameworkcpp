@@ -54,7 +54,7 @@ class arena_shard_t {
         auto *payload = static_cast<std::byte *>(p);
         if (payload < bytes() || payload >= slice_end())
             return;
-        auto *b = detail::block_of_payload(payload);
+        auto *b = detail::block_of_payload(bytes(), payload);
         if (b < bytes() || b >= slice_end())
             return;
         detail::block_header hdr{};
@@ -63,6 +63,8 @@ class arena_shard_t {
             return;
         auto &d = buckets()[hdr.bucket];
         const auto index = static_cast<std::int64_t>((b - detail::run_base(bytes(), d)) / d.stride);
+        if (!detail::valid_block_index(d, index))
+            return;
         detail::note_free(d);
         detail::free_block(bytes(), d, index);
     }

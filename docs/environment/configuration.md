@@ -112,6 +112,8 @@ struct environment_stats_t {
     std::uint64_t total_updates;    // writes committed so far (monotonic)
     std::size_t   journal_size;
     std::size_t   retired_pending;  // retired cells waiting to be recycled
+    std::size_t   max_threads;      // per-thread view pool size
+    std::size_t   active_views;     // views currently claimed by live threads
 };
 
 auto stats = environment::environment_stats();

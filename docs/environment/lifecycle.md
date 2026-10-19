@@ -84,6 +84,7 @@ environment::shutdown();
 | `init` / `shutdown` | No — call from a single thread, at startup and teardown. |
 
 Views are per-thread and are drawn from a fixed pool (`max_threads`). A thread
-takes a view the first time it touches the store; if the pool is exhausted,
-`get_env` still works by reading the global slot directly (just slower). The
-arena must outlive every reader and writer.
+claims a free slot the first time it touches the store and hands it back when the
+thread exits, so slots are recycled rather than consumed; if every slot is in use
+at once, `get_env` still works by reading the global slot directly (just slower).
+The arena must outlive every reader and writer.

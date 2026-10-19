@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cstdint>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 #include "frameworkcpp/arena/arena.hpp"
@@ -140,7 +141,7 @@ TEST(ArenaShard, ArenaGrowsWithAnotherMmapWhenShardDoesNotFit) {
     EXPECT_GT(arena.capacity(), capacity_after_small);
     auto *p = big.allocate_bytes(1024, 8);
     ASSERT_NE(p, nullptr);
-    arena.deallocate(p);
+    big.deallocate(p);
 }
 
 TEST(ArenaShard, TaggedBucketAllocation) {
@@ -276,11 +277,31 @@ TEST(ArenaShard, DeallocateForeignPointerIsBenign) {
     auto *p = shard.allocate<std::uint64_t>();
     ASSERT_NE(p, nullptr);
     shard.deallocate(p);
+    // A pointer that was never handed out by a shard is ignored, not trusted.
     shard.deallocate_bytes(reinterpret_cast<void *>(0x1234));
-    arena.deallocate_bytes(reinterpret_cast<void *>(0x5678));
     auto *p2 = shard.allocate<std::uint64_t>();
     ASSERT_NE(p2, nullptr);
     shard.deallocate(p2);
+}
+
+TEST(ArenaShard, DeallocateThroughWrongShardIsBenign) {
+    arena_t arena;
+    auto a = arena.create_shard(1, {{0, 8, 8, 4}});
+    auto b = arena.create_shard(2, {{0, 8, 8, 4}});
+    auto *p = a.allocate<std::uint64_t>();
+    ASSERT_NE(p, nullptr);
+    b.deallocate_bytes(p); // outside b's slice: ignored
+    a.deallocate(p);       // still freeable through its own shard
+    auto *again = a.allocate<std::uint64_t>();
+    ASSERT_NE(again, nullptr);
+    a.deallocate(again);
+}
+
+TEST(ArenaType, IsNeitherCopyableNorMovable) {
+    static_assert(!std::is_copy_constructible_v<arena_t>);
+    static_assert(!std::is_copy_assignable_v<arena_t>);
+    static_assert(!std::is_move_constructible_v<arena_t>);
+    static_assert(!std::is_move_assignable_v<arena_t>);
 }
 
 TEST(ArenaShard, BucketStatsTrackUseAndFrees) {
