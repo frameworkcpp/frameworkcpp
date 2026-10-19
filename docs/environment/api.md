@@ -16,6 +16,10 @@ void shutdown() noexcept;
                                        std::string_view fallback);
 bool set_env(std::string_view key, std::string_view value);
 
+struct environment_entry_t { std::string_view key; std::string_view value; };
+[[nodiscard]] std::size_t environment_keys(environment_entry_t *out,
+                                           std::size_t capacity) noexcept;
+
 std::size_t environment_footprint(const environment_config_t &config);
 
 }
@@ -74,6 +78,29 @@ Updates are effectively unbounded: a superseded value cell is retired and later
 recycled once no live reader can still see it, so repeated writes reuse the same
 fixed pool of cells instead of draining a budget.
 
+## environment_keys
+
+```cpp
+[[nodiscard]] std::size_t environment_keys(environment_entry_t *out,
+                                           std::size_t capacity) noexcept;
+```
+
+Copies up to `capacity` key/value pairs into `out` and returns how many were
+written. Both `std::string_view`s point straight at immutable arena cells, so
+they stay valid while the module lives and the entry is not overwritten by a
+later `set_env`. Returns `0` when the module is uninitialized or `out` is null.
+
+```cpp
+environment_entry_t entries[64];
+const std::size_t n = environment_keys(entries, 64);
+for (std::size_t i = 0; i < n; ++i) std::printf("%.*s=%.*s\n",
+    (int)entries[i].key.size(), entries[i].key.data(),
+    (int)entries[i].value.size(), entries[i].value.data());
+```
+
+This is an introspection helper, not a hot path: it walks the whole key table,
+so a real-time loop should still know its keys by name.
+
 ## environment_footprint
 
 ```cpp
@@ -99,7 +126,8 @@ footprint itself is exact.
 - **No deletion**: there is no `unset_env`. Removing a key would need
   reclamation, and reclamation fights immutability. Model "absent" with a value
   instead.
-- **No enumeration**: `get_env` is the iterator. A real-time system should know
-  its keys by name, not walk a map.
+- **No enumeration on the hot path**: `environment_keys` exists for debugging and
+  export, but it walks the whole table. A real-time loop should know its keys by
+  name, not walk a map.
 - **No exceptions on the hot path**: `get_env` and `set_env` never throw; only
   `init` does, and only at setup.

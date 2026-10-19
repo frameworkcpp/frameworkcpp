@@ -2,6 +2,7 @@
 
 #include <gtest/gtest.h>
 
+#include "frameworkcpp/arena/version.hpp"
 #include "frameworkcpp/environment/version.hpp"
 
 namespace frameworkcpp::environment {
@@ -21,6 +22,13 @@ TEST(VersionTest, Patch) {
 
 TEST(VersionTest, String) {
     EXPECT_STREQ(version_string(), "1.0.0");
+}
+
+TEST(VersionTest, ArenaMatchesEnvironment) {
+    EXPECT_EQ(arena::version_major(), version_major());
+    EXPECT_EQ(arena::version_minor(), version_minor());
+    EXPECT_EQ(arena::version_patch(), version_patch());
+    EXPECT_STREQ(arena::version_string(), version_string());
 }
 
 } // namespace

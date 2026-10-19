@@ -19,8 +19,13 @@ std::vector<int, arena_allocator<int>> values(alloc);
 for (int i = 0; i < 100; ++i) values.push_back(i);
 ```
 
-- Two allocators are equal when they point at the same shard; a default
-  (empty) allocator is never equal to a shard-backed one.
+- Two shard-backed allocators are equal when they point at the same shard; two
+  default (empty) allocators are equal to each other; an empty allocator is
+  never equal to a shard-backed one.
+- The standard propagation traits are all `false_type` and
+  `is_always_equal` is `false_type` (allocators over different shards are not
+  interchangeable), so container copy/move/swap never smuggle a different
+  shard in silently.
 - Allocations are served by the shard's smallest-fit bucket, so give the shard
   a bucket big enough for the largest contiguous block the container will ever
   ask for — say 1 KiB for a growing `std::vector<int>`.

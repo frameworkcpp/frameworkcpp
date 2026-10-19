@@ -80,6 +80,8 @@ class arena_t {
     std::array<shard_entry, kMaxArenaShards> shards_ = {};
     std::size_t region_count_ = 0;
     std::size_t shard_count_ = 0;
+    std::atomic<std::size_t> capacity_{0};
+    std::atomic<std::size_t> used_{0};
     std::atomic<bool> soft_exceeded_{false};
 };
 
@@ -136,6 +138,7 @@ inline detail::region *arena_t::region_for(std::size_t bytes) {
     if (!r.reserve(page_bytes, config_.touch_pages))
         return nullptr;
     ++region_count_;
+    capacity_.fetch_add(page_bytes, std::memory_order_relaxed);
     check_soft_limit();
     return &r;
 }
@@ -179,6 +182,7 @@ inline arena_shard_t arena_t::build_shard(std::uint64_t tag, std::span<const obj
     auto *slice = region->take(bytes);
     if (slice == nullptr)
         return view;
+    used_.fetch_add(bytes, std::memory_order_relaxed);
 
     const auto shard_index = static_cast<std::uint32_t>(shard_count_);
     const auto region_index = static_cast<std::uint32_t>(region - regions_.data());
@@ -233,6 +237,19 @@ inline arena_shard_t arena_t::build_shard(std::uint64_t tag, std::span<const obj
         offset += static_cast<std::size_t>(descs[i].count) * descs[i].stride;
     }
 
+    // Order descriptors by ascending object_size so allocate_bytes can stop at
+    // the first fit. Descriptors are self-contained (each carries its own run,
+    // mutex, ring and seq offsets), so reordering them keeps the layout intact.
+    for (std::size_t i = 1; i < specs.size(); ++i) {
+        const detail::bucket_descriptor key = descs[i];
+        std::size_t j = i;
+        while (j > 0 && descs[j - 1].object_size > key.object_size) {
+            descs[j] = descs[j - 1];
+            --j;
+        }
+        descs[j] = key;
+    }
+
     shards_[shard_count_++] = {
         tag, static_cast<std::uint32_t>(region_index), static_cast<std::uint32_t>(slice_offset)};
 
@@ -281,17 +298,13 @@ inline std::size_t arena_t::shard_count() const noexcept {
 }
 
 inline std::size_t arena_t::capacity() const noexcept {
-    std::size_t total = 0;
-    for (std::size_t i = 0; i < region_count_; ++i)
-        total += regions_[i].bytes();
-    return total;
+    return capacity_.load(std::memory_order_acquire);
 }
 
+// High-water mark of the bytes carved out of the regions. The arena never
+// returns memory to a region, so this only grows.
 inline std::size_t arena_t::used() const noexcept {
-    std::size_t total = 0;
-    for (std::size_t i = 0; i < region_count_; ++i)
-        total += regions_[i].free_top();
-    return total;
+    return used_.load(std::memory_order_acquire);
 }
 
 inline std::size_t arena_t::live() const noexcept {
