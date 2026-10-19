@@ -26,17 +26,14 @@ class arena_shard_t {
         if (hdr_ == nullptr)
             return nullptr;
         const auto count = hdr_->bucket_count;
-        std::int32_t best = -1;
+        // Buckets are ordered by ascending object_size (see build_shard), so the
+        // first bucket that fits both size and alignment is the smallest fit.
         for (std::uint32_t i = 0; i < count; ++i) {
-            auto &d = buckets()[i];
-            if (d.object_size >= bytes && d.align >= alignment) {
-                if (best < 0 || d.object_size < buckets()[best].object_size)
-                    best = static_cast<std::int32_t>(i);
-            }
+            const auto &d = buckets()[i];
+            if (d.object_size >= bytes && d.align >= alignment)
+                return take_block(i);
         }
-        if (best < 0)
-            return nullptr;
-        return take_block(static_cast<std::uint32_t>(best));
+        return nullptr;
     }
 
     std::byte *allocate_tagged(std::uint64_t tag, std::size_t bytes, std::size_t alignment) {

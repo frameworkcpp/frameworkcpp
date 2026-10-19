@@ -78,6 +78,42 @@ TEST(ArenaShard, SmallestFitBucketIsSelected) {
     shard.deallocate(large);
 }
 
+TEST(ArenaShard, UnsortedSpecsStillPickSmallestFit) {
+    arena_t arena;
+    auto shard = arena.create_shard(1, {{2, 256, 8, 8}, {0, 16, 8, 8}, {1, 64, 8, 8}});
+    ASSERT_TRUE(shard);
+    // Descriptors are published ordered by ascending object_size.
+    EXPECT_EQ(shard.stats(0).object_size, 16U);
+    EXPECT_EQ(shard.stats(1).object_size, 64U);
+    EXPECT_EQ(shard.stats(2).object_size, 256U);
+
+    auto *small = shard.allocate<std::uint32_t>();
+    auto *mid = shard.allocate_bytes(24, 8);
+    auto *large = shard.allocate_bytes(200, 8);
+    ASSERT_NE(small, nullptr);
+    ASSERT_NE(mid, nullptr);
+    ASSERT_NE(large, nullptr);
+    // The smallest fitting bucket won: 16-byte bucket for 4 bytes, 64 for 24,
+    // 256 for 200. Distinct buckets => distinct runs, so pointers differ.
+    EXPECT_NE(static_cast<const void *>(small), static_cast<const void *>(mid));
+    EXPECT_NE(static_cast<const void *>(mid), static_cast<const void *>(large));
+    shard.deallocate(small);
+    shard.deallocate(mid);
+    shard.deallocate(large);
+}
+
+TEST(ArenaShard, AlignmentBeatsSmallerBucket) {
+    arena_t arena;
+    auto shard = arena.create_shard(1, {{1, 32, 64, 8}, {0, 16, 8, 8}});
+    ASSERT_TRUE(shard);
+    // 16 bytes fit the 16-byte bucket, but it only guarantees 8-byte alignment;
+    // the 32-byte/64-aligned bucket must be picked instead.
+    auto *p = shard.allocate_bytes(16, 64);
+    ASSERT_NE(p, nullptr);
+    EXPECT_EQ(reinterpret_cast<std::uintptr_t>(p) % 64, 0);
+    shard.deallocate(p);
+}
+
 TEST(ArenaShard, ShardsAreIsolatedSlices) {
     arena_t arena;
     auto a = arena.create_shard(1, {{0, 8, 8, 2}});
