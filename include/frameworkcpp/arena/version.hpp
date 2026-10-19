@@ -2,16 +2,24 @@
 
 #pragma once
 
-#include <cstddef>
-
 namespace frameworkcpp::arena {
-inline constexpr int version_major() noexcept {
+
+[[nodiscard]] constexpr int version_major() noexcept {
     return 1;
 }
-inline constexpr int version_minor() noexcept {
+[[nodiscard]] constexpr int version_minor() noexcept {
     return 0;
 }
-inline constexpr int version_patch() noexcept {
+[[nodiscard]] constexpr int version_patch() noexcept {
     return 0;
 }
+
+[[nodiscard]] inline const char *version_string() noexcept {
+#ifdef FRAMEWORKCPP_VERSION_STRING
+    return FRAMEWORKCPP_VERSION_STRING;
+#else
+    return "0.0.0";
+#endif
+}
+
 } // namespace frameworkcpp::arena

@@ -76,6 +76,9 @@ int main()
 }
 ```
 
+Prefer one include? `<frameworkcpp/frameworkcpp.hpp>` pulls in every module;
+reach for the granular headers when you only need one and want faster builds.
+
 ## What's next
 
 Read the [Memory Management](/memory-management/) section to understand the

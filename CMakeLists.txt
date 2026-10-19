@@ -108,6 +108,11 @@ if(FRAMEWORKCPP_BUILD_TESTING)
     target_compile_features(frameworkcpp_environment_heap_test PRIVATE cxx_std_20)
     gtest_discover_tests(frameworkcpp_environment_heap_test)
 
+    add_executable(frameworkcpp_umbrella_test tests/umbrella_test.cpp)
+    target_link_libraries(frameworkcpp_umbrella_test PRIVATE frameworkcpp GTest::gtest_main)
+    target_compile_features(frameworkcpp_umbrella_test PRIVATE cxx_std_20)
+    gtest_discover_tests(frameworkcpp_umbrella_test)
+
     option(FRAMEWORKCPP_ENABLE_CLANG_TIDY "Run clang-tidy on the framework's translation units" OFF)
     if(FRAMEWORKCPP_ENABLE_CLANG_TIDY)
         find_program(_frameworkcpp_clang_tidy NAMES clang-tidy clang-tidy-19)
@@ -120,6 +125,7 @@ if(FRAMEWORKCPP_BUILD_TESTING)
                 frameworkcpp_arena_allocator_test
                 frameworkcpp_environment_test
                 frameworkcpp_environment_heap_test
+                frameworkcpp_umbrella_test
                 PROPERTIES CXX_CLANG_TIDY "${_frameworkcpp_clang_tidy}"
             )
         else()
