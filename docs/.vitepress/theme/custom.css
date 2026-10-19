@@ -23,8 +23,7 @@
   /* Reading rhythm */
   --fc-prose-size: 16px;
   --fc-prose-leading: 1.7;
-  --fc-content-width: 46rem;
-  --fc-sidebar-gap: 3rem;
+  --fc-sidebar-gap: 2.5rem;
 
   /* Inline code */
   --fc-code-radius: 6px;
@@ -265,15 +264,20 @@ body {
 }
 
 @media (min-width: 960px) {
-  /* Air between the sidebar, the article and the outline. */
-  .VPDoc {
-    padding-left: var(--fc-sidebar-gap) !important;
+  /* Use the whole width: sidebar plus a gap on each side, nothing centred. */
+  .VPContent.has-sidebar {
+    padding-left: calc(var(--vp-sidebar-width) + var(--fc-sidebar-gap)) !important;
     padding-right: var(--fc-sidebar-gap) !important;
+  }
+
+  .VPDoc {
+    padding-left: 0 !important;
+    padding-right: 0 !important;
   }
 
   .VPDoc .content-container,
   .VPDoc.has-aside .content-container {
-    max-width: var(--fc-content-width) !important;
+    max-width: none !important;
   }
 }
 
