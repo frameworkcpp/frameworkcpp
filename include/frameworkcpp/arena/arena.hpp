@@ -45,9 +45,6 @@ class arena_t {
     arena_shard_t create_shard(std::uint64_t tag, std::span<const object_spec_t> specs);
     arena_shard_t from(std::uint64_t tag) const;
 
-    void deallocate_bytes(void *p) noexcept;
-    void deallocate(void *p) noexcept { deallocate_bytes(p); }
-
     std::size_t shard_count() const noexcept;
     std::size_t capacity() const noexcept;
     std::size_t used() const noexcept;
@@ -255,41 +252,6 @@ inline arena_shard_t arena_t::build_shard(std::uint64_t tag, std::span<const obj
 
     view.hdr_ = hdr;
     return view;
-}
-
-inline void arena_t::deallocate_bytes(void *p) noexcept {
-    if (p == nullptr || shard_count_ == 0)
-        return;
-    auto *payload = static_cast<std::byte *>(p);
-    const std::lock_guard lock{registry_mutex_};
-    detail::region *owner = nullptr;
-    for (std::size_t i = 0; i < region_count_; ++i) {
-        auto &r = regions_[i];
-        if (payload >= r.base() && payload < r.base() + r.bytes()) {
-            owner = &r;
-            break;
-        }
-    }
-    if (owner == nullptr)
-        return;
-    auto *b = detail::block_of_payload(payload);
-    if (b < owner->base() || b >= owner->base() + owner->bytes())
-        return;
-    detail::block_header hdr{};
-    __builtin_memcpy(&hdr, b, sizeof(hdr));
-    if (hdr.shard >= shard_count_)
-        return;
-    const auto &entry = shards_[hdr.shard];
-    if (entry.region_index >= region_count_ || owner != &regions_[entry.region_index])
-        return;
-    auto *slice = owner->base() + entry.slice_offset;
-    auto *shard_hdr = reinterpret_cast<detail::shard_header *>(slice);
-    if (hdr.bucket >= shard_hdr->bucket_count)
-        return;
-    auto &db = reinterpret_cast<detail::bucket_descriptor *>(shard_hdr + 1)[hdr.bucket];
-    const auto index = static_cast<std::int64_t>((b - detail::run_base(slice, db)) / db.stride);
-    detail::note_free(db);
-    detail::free_block(slice, db, index);
 }
 
 inline std::size_t arena_t::shard_count() const noexcept {

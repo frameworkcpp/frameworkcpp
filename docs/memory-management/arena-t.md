@@ -53,20 +53,29 @@ arena_shard_t create_shard(std::uint64_t tag, std::span<const object_spec_t> spe
 - `from(tag)` fetches an existing shard by tag, or an empty (falsy) view when
   it does not exist.
 
-## The arena, not the shard
+## The arena owns, the shard frees
 
-Everything about allocating belongs to the shard page. The arena itself is
-about ownership and budget:
+The arena owns the memory and the budget; freeing is the shard's job. Keep the
+shard view next to the pointer it handed out:
 
 ```cpp
 arena_t arena;
-auto *slot = arena.create_shard(...).allocate<std::uint32_t>();
-arena.deallocate(slot);              // works even if you lost track of the shard
+auto shard = arena.create_shard(...);
+auto *slot = shard.allocate<std::uint32_t>();
+// ...
+shard.deallocate(slot);
 ```
 
-`arena.deallocate` finds the owning region and bucket from the pointer alone;
-use it when you only hold a raw pointer. If you still have the shard, its
-`deallocate` is faster.
+There is no `arena.deallocate`. A slot is only freed through the shard that
+owns its bucket, so the arena needs no per-slot bookkeeping and stays free of
+any global "find the owner from the pointer" state.
+
+## Not copyable, not movable
+
+`arena_t` owns its regions and pins them with an intrusive registry, so it is
+neither copyable nor movable. Keep it in a stable location (a local, a member,
+or a `std::unique_ptr`) and keep it alive while any shard or slot you got from
+it is still in use.
 
 ## Knowing the budget
 

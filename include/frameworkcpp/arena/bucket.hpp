@@ -25,9 +25,11 @@ class arena_bucket_t {
     void deallocate_bytes(void *p) noexcept {
         if (desc_ == nullptr || p == nullptr)
             return;
-        auto *b = detail::block_of_payload(static_cast<std::byte *>(p));
+        auto *b = detail::block_of_payload(slice_, static_cast<std::byte *>(p));
         const auto index =
             static_cast<std::int64_t>((b - detail::run_base(slice_, *desc_)) / desc_->stride);
+        if (!detail::valid_block_index(*desc_, index))
+            return;
         detail::note_free(*desc_);
         detail::free_block(slice_, *desc_, index);
     }
