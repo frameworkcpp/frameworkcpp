@@ -1,11 +1,11 @@
 # Buckets
 
-A **bucket** is a pool of same-size slots inside a shard. Shards give you
-isolation; buckets give you speed — every slot in a bucket shares one size,
-one alignment and one free-list, so allocation is a pop and a store.
+A shard gives you isolation; a **bucket** gives you speed. Every slot in a
+bucket shares one size, one alignment and one free-list, so allocating is a pop
+and a store — no search for a hole that fits.
 
-A bucket is never created on its own. It is declared when you create the
-shard, as one `object_spec_t` entry, and you later grab a handle to it with
+A bucket is never created on its own. It is declared when you create the shard,
+as one `object_spec_t` entry, and you later grab a handle to it with
 `shard.get_bucket(tag, concurrency_model_t)`.
 
 ```cpp
@@ -18,8 +18,8 @@ bucket without building the arena.
 
 ## Declaring a bucket
 
-A bucket lives inside a shard's `create_shard` call. Each `object_spec_t`
-entry becomes one bucket:
+A bucket lives inside a shard's `create_shard` call. Each `object_spec_t` entry
+becomes one bucket:
 
 ```cpp
 enum class bucket_tag : std::uint64_t { commands_ = 0, payloads_ = 1 };
@@ -63,10 +63,10 @@ explicit operator bool() const noexcept;
 
 A bucket handle only hands out slots from its own pool — it never goes hunting
 through the shard. Freed slots are reused within the bucket. Allocation fails
-with `nullptr` when the request is bigger than the bucket's `object_size` or
+with `nullptr` when the request is bigger than the bucket's `object_size_` or
 more aligned than the bucket allows.
 
-## Example
+## A full example
 
 ```cpp
 using namespace frameworkcpp::arena;

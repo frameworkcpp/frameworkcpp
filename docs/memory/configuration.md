@@ -1,7 +1,9 @@
 # Configuration
 
-The arena is tuned through plain structs, and its memory budget can be decided
-at compile time.
+The arena is tuned through plain structs, and — because it never grows by
+surprise — you can decide its whole memory budget at compile time. This page is
+the reference for the knobs: the concurrency models, the bucket spec, the arena
+settings and the compile-time footprints.
 
 ```cpp
 #include <frameworkcpp/arena/arena.hpp>
@@ -16,7 +18,7 @@ inside a **shard**, which is a slice of an **arena**. See
 ## Concurrency models
 
 Concurrency is chosen per bucket, when you grab it with
-`shard.get_bucket(tag, concurrency_model_t)`.
+`shard.get_bucket(tag, concurrency_model_t)`. The three models are:
 
 ```cpp
 enum class concurrency_model_t : std::uint8_t {
@@ -33,16 +35,17 @@ without locks; `thread_safe_` is the "do not think" option.
 
 ```cpp
 struct object_spec_t {
-    std::uint64_t tag_;                             // identifies the bucket
-    std::size_t   object_size_;                     // bytes per slot
+    std::uint64_t tag_;                               // identifies the bucket
+    std::size_t   object_size_;                       // bytes per slot
     std::size_t   align_ = alignof(std::max_align_t); // slot alignment
-    std::size_t   count_;                           // slots to reserve
+    std::size_t   count_;                             // slots to reserve
 };
 ```
 
 `create_shard` rejects a shard when any spec is malformed — `object_size_` or
 `count_` zero, or `align_` not a power of two (alignment is capped at 64). A
-rejected shard simply returns an empty view.
+rejected shard simply returns an empty view, so a typo fails loudly at setup
+instead of corrupting memory later.
 
 ## Arena settings
 

@@ -1,8 +1,8 @@
 # Lifecycle
 
-The module has a small lifecycle: one `init` at startup, one `shutdown` at
+The store has a small lifecycle: one `init` at startup, one `shutdown` at
 teardown, and a fixed order between them. Everything the store will ever hold is
-decided at `init`.
+decided at `init` — nothing grows later.
 
 ```cpp
 #include <frameworkcpp/environment/environment.hpp>
@@ -25,9 +25,9 @@ void shutdown() noexcept;
 
 ### Precedence: the process wins
 
-The file never overrides a variable the process already set. This is the
-classic dotenv behaviour: the file describes defaults for a clean environment,
-while an operator can still override any value with `ABC=something ./app`.
+The file never overrides a variable the process already set. This is the classic
+dotenv behaviour: the file describes defaults for a clean environment, while an
+operator can still override any value with `ABC=something ./app`.
 
 ```
 process environment   ──► inserted first  ──► wins
@@ -35,7 +35,7 @@ file "app.env"        ──► inserted second ──► only fills the gaps
 ```
 
 `init` ingests **the whole process environment**, not just the keys the file
-mentions. That is convenient but it costs key and value capacity — size
+mentions. That is convenient, but it costs key and value capacity — size
 `max_keys_` / `max_value_len_` for the host, or set `read_process_env_ = false`
 when you want the file to be the single source of truth.
 
@@ -86,5 +86,5 @@ environment::shutdown();
 Views are per-thread and are drawn from a fixed pool (`max_threads_`). A thread
 claims a free slot the first time it touches the store and hands it back when the
 thread exits, so slots are recycled rather than consumed; if every slot is in use
-at once, `get_env` still works by reading the global slot directly (just slower).
-The arena must outlive every reader and writer.
+at once, `get_env` still works by reading the global slot directly (just
+slower). The arena must outlive every reader and writer.

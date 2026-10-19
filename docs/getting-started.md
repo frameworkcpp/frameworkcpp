@@ -1,32 +1,40 @@
 # Getting Started
 
-FrameworkCpp is a **header-only C++20 framework** for building real-time
-systems. It is modular: each module is a self-contained set of headers under
-`include/frameworkcpp/<module>/`, and you only pay for the modules you use.
+Writing a real-time system in C++ is a fight against the things that make
+latency unpredictable: an allocation that occasionally takes milliseconds, a
+lock that stalls under contention, a global that two threads mutate at once.
+FrameworkCpp is a **header-only C++20 framework** that gives you the pieces to
+win that fight — memory, configuration, and the modules still to come — with no
+dynamic allocation on hot paths and no locks on fast paths.
 
-The documented modules are [Memory Management](/memory-management/), the
-arena-backed allocator layer, and [Environment Management](/environment/), a
-dotenv-style configuration store built on top of it. More modules are on the
-way.
+You do not adopt the whole framework at once. It is modular: each module is a
+self-contained set of headers under `include/frameworkcpp/<module>/`, and you
+pull in only the ones you use.
 
 ## What you need
 
 - A C++20 compiler (GCC 10+, Clang 11+).
-- CMake 3.23 or newer (only required to build the tests).
-- POSIX: the arena module uses `mmap`, so it targets Linux by design.
+- CMake 3.23 or newer — only to build the tests, not to use the headers.
+- A POSIX system: the memory module uses `mmap`, so Linux is the target by
+  design.
 
 ## Using it as a header-only library
 
-No installation is required to *use* the headers:
+There is nothing to install and nothing to link. Point the compiler at the
+include directory and include the header you need:
 
 ```bash
 git clone https://github.com/frameworkcpp/frameworkcpp.git
 g++ -std=c++20 -I frameworkcpp/include app.cpp -o app
 ```
 
+Every module also exposes its own version entry points
+(`frameworkcpp::<module>::get_version_*`), so a binary can report what it was
+built against.
+
 ## Building the tests
 
-The repository ships CMake presets so the classic flow just works:
+The repository ships CMake presets, so the classic flow just works:
 
 ```bash
 cmake --preset debug
@@ -34,19 +42,19 @@ cmake --build --preset debug
 ctest --preset debug
 ```
 
-Other presets: `asan`, `tsan`, `ubsan` and `release`.
+The other presets are `asan`, `tsan`, `ubsan` and `release`. Sanitizer builds
+pull in Clang through the preset:
 
 ```bash
-# sanitizer builds pull in clang through the preset
 cmake --preset asan && cmake --build --preset asan && ctest --preset asan
 ```
 
-> TSAN requires a 64-bit platform. Sanitizers do not run on QEMU-emulated
-> architectures; the CI matrix reflects exactly which combinations are valid.
+> TSAN needs a 64-bit platform, and sanitizers do not run on QEMU-emulated
+> architectures; the CI matrix encodes exactly which combinations are valid.
 
-## Installing it
+## Installing it as a CMake package
 
-Make `find_package(frameworkcpp)` available to other projects:
+To make `find_package(frameworkcpp)` available to other projects:
 
 ```bash
 cmake --preset release -DFRAMEWORKCPP_BUILD_TESTING=OFF
@@ -54,7 +62,7 @@ cmake --build --preset release
 cmake --install build/release --prefix /usr/local
 ```
 
-Then a consumer project can use it like any CMake package:
+A consumer project then uses it like any other package:
 
 ```cmake
 find_package(frameworkcpp REQUIRED)
@@ -62,16 +70,15 @@ target_link_libraries(app PRIVATE frameworkcpp::frameworkcpp)
 ```
 
 ```cpp
-#include <frameworkcpp/arena/arena.hpp>
+#include <frameworkcpp/frameworkcpp.hpp>   // every module, or include one at a time
 
 int main()
 {
     frameworkcpp::arena::arena_t arena;
-    // create a shard (tag 1) holding one bucket (tag 0): 64 slots of int.
-    auto shard = arena.create_shard(
-        1,
-        {{0, sizeof(int), alignof(int), 64}});
-    auto *p = shard.allocate<int>();
+    // carve a shard (tag 1) with one bucket (tag 0): 64 slots of int.
+    auto shard = arena.create_shard(1, {{0, sizeof(int), alignof(int), 64}});
+
+    auto *p = shard.allocate<int>();   // no malloc, no lock
     shard.deallocate(p);
 }
 ```
@@ -79,9 +86,15 @@ int main()
 Prefer one include? `<frameworkcpp/frameworkcpp.hpp>` pulls in every module;
 reach for the granular headers when you only need one and want faster builds.
 
-## What's next
+## Where to go next
 
-Read the [Memory Management](/memory-management/) section to understand the
-model — shards, buckets, concurrency models and smart pointers — then the
-[Environment Management](/environment/) module that builds the configuration
-store on top of it.
+The documentation is organised by module, and each section reads top to bottom:
+the idea first, then the pieces, then the details.
+
+- [Memory](/memory/) — the arena-backed memory model: shards, buckets,
+  concurrency models and smart pointers.
+- [Environment](/environment/) — a dotenv-style configuration store built on top
+  of the memory module.
+
+More modules are on the way, and the menu grows with them. If you want to write
+a page yourself, start with [Writing Documentation](/contribute/documentation).

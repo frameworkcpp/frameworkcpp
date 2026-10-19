@@ -22,19 +22,19 @@ export default defineConfig({
         link: '/getting-started'
       },
       {
-        text: 'Memory Management',
+        text: 'Memory',
         items: [
-          { text: 'Overview', link: '/memory-management/' },
-          { text: 'The Arena', link: '/memory-management/arena-t' },
-          { text: 'Shards', link: '/memory-management/arena-shard-t' },
-          { text: 'Buckets', link: '/memory-management/arena-bucket' },
-          { text: 'Smart Pointers', link: '/memory-management/smart-pointers' },
-          { text: 'Allocators & std::pmr', link: '/memory-management/allocator' },
-          { text: 'Configuration', link: '/memory-management/configuration' }
+          { text: 'Overview', link: '/memory/' },
+          { text: 'The Arena', link: '/memory/arena-t' },
+          { text: 'Shards', link: '/memory/arena-shard-t' },
+          { text: 'Buckets', link: '/memory/arena-bucket' },
+          { text: 'Smart Pointers', link: '/memory/smart-pointers' },
+          { text: 'Allocators & std::pmr', link: '/memory/allocator' },
+          { text: 'Configuration', link: '/memory/configuration' }
         ]
       },
       {
-        text: 'Environment Management',
+        text: 'Environment',
         items: [
           { text: 'Overview', link: '/environment/' },
           { text: 'Lifecycle', link: '/environment/lifecycle' },

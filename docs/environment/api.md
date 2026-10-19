@@ -1,7 +1,8 @@
 # The API
 
-The public surface is four functions and one configuration type. Everything else
-is internal.
+The public surface is small: four functions and a couple of types. Everything
+else is internal. This page is the reference for what each one does and the
+rules you have to respect when you call it.
 
 ```cpp
 namespace frameworkcpp::environment {

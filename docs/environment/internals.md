@@ -1,9 +1,9 @@
 # Internals
 
-This page is the "inside" of the module: the structures carved into the arena,
-the version protocol that makes reads cheap, and the memory ordering that keeps
-it correct. You do not need any of it to *use* the store — read it when you want
-to reason about performance, footprint, or the concurrency guarantees.
+You do not need any of this to *use* the store. Read it when you want to reason
+about why a read is cheap, what the footprint really is, or how the concurrency
+guarantees hold — the structures carved into the arena, the version protocol,
+and the memory ordering that keeps it correct.
 
 Everything below lives in `namespace frameworkcpp::environment::detail`, in
 `<frameworkcpp/environment/detail/digest.hpp>` and
@@ -107,8 +107,8 @@ mutex, so the table has a single writer.
 
 ## The version protocol
 
-This is the heart of the design. `version_` counts committed updates; the ring is
-the ordered list of what each update changed. `set_env` on a key that already
+This is the heart of the design. `version_` counts committed updates; the ring
+is the ordered list of what each update changed. `set_env` on a key that already
 exists also **retires** the previous cell.
 
 **Writer** (`set_env`, holding the mutex):

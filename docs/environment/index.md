@@ -1,11 +1,14 @@
-# Environment Management
+# Environment
 
 Software is configured through the environment: what the process inherited when
-it started, and what a `.env` file declares. `frameworkcpp::environment` is the
-**Environment Management** module — a dotenv-style store built on the arena.
-Every key and value lives in a single arena shard, reads never touch the heap or
-take a lock, and values are immutable once published: a write publishes a new
-cell instead of editing the old one.
+it started, and what a `.env` file declares. Reading that configuration is
+usually a string map behind a lock, and a lock on a hot path is exactly what a
+real-time system cannot afford.
+
+`frameworkcpp::environment` is a dotenv-style store built on the arena. Every
+key and value lives in a single arena shard, reads never touch the heap or take
+a lock, and values are immutable once published: a write publishes a new cell
+instead of editing the old one.
 
 The whole module is header-only and lives in one include:
 
@@ -18,7 +21,7 @@ The whole module is header-only and lives in one include:
 | Concept | What it is |
 | --- | --- |
 | **Store** | The module's arena shard. It owns the key table, the value pool, the journal and one view per thread. |
-| **Key** | A name (up to `max_key_len` bytes) that maps to the latest published value. Keys are immutable once inserted. |
+| **Key** | A name (up to `max_key_len_` bytes) that maps to the latest published value. Keys are immutable once inserted. |
 | **Value** | An immutable cell holding the value bytes. `set_env` always builds a fresh cell; nothing is edited in place. |
 | **View** | A per-thread cache of value pointers plus the version that cache is current to. It is what makes reads cheap. |
 | **Journal** | The append-only list of updates a behind thread replays to catch up. |
@@ -57,9 +60,9 @@ int main()
 
 ## Why it is cheap (and heap-free)
 
-The interesting part is how a multithreaded read stays cheap. Each thread keeps a
-private cache and a version number; a read compares that version with one global
-counter:
+The interesting part is how a multithreaded read stays cheap. Each thread keeps
+a private cache and a version number; a read compares that version with one
+global counter:
 
 - **same version** → read straight from the private cache;
 - **behind** → replay only the journal entries the thread missed, update the
