@@ -37,6 +37,13 @@ auto shard = arena.create_shard(1, {{0, 64, alignof(std::max_align_t), 32}});
 the factory, so the arena that owns the block is never out of sync. It is
 move-only — there is no copy, and no way to build it from a raw pointer.
 
+```mermaid
+flowchart LR
+    make["make_arena_unique_ptr"] --> owner["arena_unique_ptr_t — the only owner"]
+    owner --> obj["object in an arena slot"]
+    obj -.->|"owner destroyed"| back["~T runs, slot returns to the bucket"]
+```
+
 ## Shared ownership
 
 When an object outlives its creator or is handed around, you want a reference
@@ -63,6 +70,15 @@ auto shard = arena.create_shard(1, {{0, 128, alignof(std::max_align_t), 16}});
     auto a = make_arena_shared_ptr<job_t>(shard, 42);
     auto b = a;              // both own the same job
 }                            // last owner gone → ~job_t + back to the arena
+```
+
+```mermaid
+flowchart LR
+    make["make_arena_shared_ptr"] --> a["arena_shared_ptr_t a"]
+    make --> b["arena_shared_ptr_t b"]
+    a --> block["object + reference count, one arena block"]
+    b --> block
+    block -.->|"last owner drops"| back["~T runs, slot returns to the bucket"]
 ```
 
 It supports the usual shared semantics — copy, move, reset, `operator->`,

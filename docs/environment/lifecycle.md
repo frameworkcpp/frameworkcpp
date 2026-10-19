@@ -29,9 +29,12 @@ The file never overrides a variable the process already set. This is the classic
 dotenv behaviour: the file describes defaults for a clean environment, while an
 operator can still override any value with `ABC=something ./app`.
 
-```
-process environment   ──► inserted first  ──► wins
-file "app.env"        ──► inserted second ──► only fills the gaps
+```mermaid
+flowchart TD
+    init["init"] --> proc["1. ingest the whole process environment"]
+    proc --> file["2. read the dotenv file"]
+    file --> rule["insert a file key only if it is still unset"]
+    rule --> win["the process wins; the file only fills the gaps"]
 ```
 
 `init` ingests **the whole process environment**, not just the keys the file

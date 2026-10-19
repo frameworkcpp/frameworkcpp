@@ -77,6 +77,26 @@ When a concept is abstract, anchor it to something concrete the reader already
 knows — a warehouse, a checkout queue, a stack of plates. Use the analogy to
 introduce the idea, then return to the real terms.
 
+## Draw it when words are not enough
+
+A structure with parts, a flow with branches, or an order of events reads
+faster as a picture. Reach for a diagram when the reader would otherwise hold
+several things in their head at once: the module's hierarchy, an allocation
+path, a read that branches on a version.
+
+Diagrams are [Mermaid](https://mermaid.js.org/) fences, and the site renders
+them with zoom, pan and fullscreen controls:
+
+```mermaid
+flowchart LR
+    reader["the idea"] --> picture["a diagram"]
+    picture --> understanding["fewer words to carry"]
+```
+
+Keep each diagram to one idea, the same rule as a section — if it needs a
+legend to be read, split it. Preview with `npm run docs:dev` before you publish:
+a malformed block fails in the browser, not in `docs:build`.
+
 ## Say the trade-offs
 
 Tell the reader when **not** to use what you are describing. Naming the limit
@@ -98,7 +118,7 @@ builds trust and prevents misuse:
 
 ## Code examples
 
-- Every fence carries a language: `cpp`, `bash`, `cmake`, `text`.
+- Every fence carries a language: `cpp`, `bash`, `cmake`, `text`, `mermaid`.
 - Use the framework's real names (`arena_t`, `get_capacity()`), not placeholders.
 - Prefer complete, copy-pasteable snippets over fragments.
 - Comment the non-obvious line, not the obvious one.
@@ -119,6 +139,7 @@ next. Headings should read like tasks or questions, not like identifiers.
 - Are the trade-offs stated?
 - Second person, present tense, no hype?
 - Does every fence have a language tag?
+- Does every diagram earn its place — and render in `docs:dev`?
 - Do the links point to pages that exist?
 
 ## Previewing the site

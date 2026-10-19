@@ -20,10 +20,14 @@ Four words explain the entire module:
 | **Bucket** | A pool of same-size slots inside a shard, identified by a tag. All its slots share one size and one alignment. |
 | **Slot** | One block of memory inside a bucket. Allocating hands you a slot; freeing returns it. |
 
-```
-mmap ─► [ region 0 ][ region 1 (only if it grows) ]...
-            └─ [ shard A ][ shard B ][ ... ]          every shard = one slice
-                   └─ [ bucket: many slots of the same size ]
+```mermaid
+flowchart TD
+    arena["arena — one or more mmap segments"] --> r0["region 0"]
+    arena --> r1["region 1 — only if it grows"]
+    r0 --> sa["shard A — tag 1, one contiguous slice"]
+    r0 --> sb["shard B — tag 2, another slice"]
+    sa --> bucket["bucket — many slots of one size"]
+    bucket --> slot["slot — one block, what allocate hands you"]
 ```
 
 ## The mental model

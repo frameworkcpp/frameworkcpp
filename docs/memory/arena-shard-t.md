@@ -61,6 +61,15 @@ std::byte* allocate_tagged(std::uint64_t tag, std::size_t bytes, std::size_t ali
 - `allocate_tagged` addresses a specific bucket by its tag, bypassing the
   smallest-fit search.
 
+```mermaid
+flowchart TD
+    call["allocate(count)"] --> need["needs count × sizeof(T) bytes, alignof(T) aligned"]
+    need --> find{"smallest bucket that fits"}
+    find -->|"found"| pop["pop one free slot"]
+    pop --> raw["raw memory — no constructor run"]
+    find -->|"none"| none["return nullptr"]
+```
+
 ```cpp
 auto *slot = workers.allocate<std::uint32_t>();
 *slot = 42;

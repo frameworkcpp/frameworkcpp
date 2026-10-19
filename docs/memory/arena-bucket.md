@@ -66,6 +66,12 @@ through the shard. Freed slots are reused within the bucket. Allocation fails
 with `nullptr` when the request is bigger than the bucket's `object_size_` or
 more aligned than the bucket allows.
 
+```mermaid
+flowchart LR
+    alloc["allocate"] -->|"pop"| list["free-list — slot → slot → slot → empty"]
+    free["deallocate"] -->|"push"| list
+```
+
 ## A full example
 
 ```cpp

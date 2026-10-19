@@ -11,6 +11,13 @@ You do not adopt the whole framework at once. It is modular: each module is a
 self-contained set of headers under `include/frameworkcpp/<module>/`, and you
 pull in only the ones you use.
 
+```mermaid
+flowchart TD
+    fc["FrameworkCpp — header-only C++20"] --> mem["memory — arena, shards, buckets, smart pointers"]
+    fc --> env["environment — dotenv-style config on the arena"]
+    fc --> more["more modules — planned"]
+```
+
 ## What you need
 
 - A C++20 compiler (GCC 10+, Clang 11+).

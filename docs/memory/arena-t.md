@@ -42,6 +42,16 @@ A few things worth knowing before you pick numbers:
   Crossing the soft limit calls `on_warning_` once and latches
   `arena.is_soft_limit_exceeded()`.
 
+```mermaid
+flowchart TD
+    reserve["create_shard wants N bytes"] --> cap{"reserved + N over hard_limit_?"}
+    cap -->|"yes"| over["throw arena_overflow_exception, or abort()"]
+    cap -->|"no"| carve["reserve the slice"]
+    carve --> soft{"crossed soft_limit_?"}
+    soft -->|"yes"| warn["call on_warning_ once, latch the flag"]
+    soft -->|"no"| ok["done"]
+```
+
 ## Carving shards
 
 ```cpp

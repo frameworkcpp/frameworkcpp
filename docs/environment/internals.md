@@ -111,6 +111,23 @@ This is the heart of the design. `version_` counts committed updates; the ring
 is the ordered list of what each update changed. `set_env` on a key that already
 exists also **retires** the previous cell.
 
+```mermaid
+sequenceDiagram
+    participant W as set_env
+    participant J as journal
+    participant V as version_
+    participant R as get_env
+    W->>J: write the patch, tag last (release)
+    W->>V: version_.store(version + 1, release)
+    R->>V: version_.load(acquire)
+    alt cache is current
+        R->>R: read the private cache
+    else cache is behind
+        R->>J: replay only the missed slots
+        R->>R: update the cache and my_version_
+    end
+```
+
 **Writer** (`set_env`, holding the mutex):
 
 1. Recycle any retired cells no live view can still see (see below).

@@ -68,6 +68,15 @@ global counter:
 - **behind** → replay only the journal entries the thread missed, update the
   cache and its version. It never clones the whole map.
 
+```mermaid
+flowchart TD
+    read["get_env(key, fallback)"] --> cmp{"view version == global version?"}
+    cmp -->|"yes"| cache["read the private cache"]
+    cmp -->|"no"| replay["replay only the missed journal entries, update the cache"]
+    replay --> cache
+    cache --> out["return a string_view into the arena cell"]
+```
+
 Because published cells are immutable, replay is race-free: a cell a thread is
 reading can never change under it. Superseded cells are *retired* and recycled
 once no live view can still see them, so updates are effectively unbounded while

@@ -22,6 +22,13 @@ std::vector<int, arena_allocator_t<int>> values(alloc);
 for (int i = 0; i < 100; ++i) values.push_back(i);
 ```
 
+```mermaid
+flowchart LR
+    vec["std::vector / std::pmr::vector"] --> alloc["arena_allocator_t or arena_memory_resource_t"]
+    alloc --> shard["the shard you bound it to"]
+    shard --> bucket["served by the smallest-fit bucket"]
+```
+
 A few behaviours worth knowing before you rely on it:
 
 - Two shard-backed allocators are equal when they point at the same shard; two
