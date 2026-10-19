@@ -42,6 +42,12 @@ export default defineConfig({
           { text: 'Internals', link: '/environment/internals' },
           { text: 'Configuration', link: '/environment/configuration' }
         ]
+      },
+      {
+        text: 'Contribute',
+        items: [
+          { text: 'Documentation', link: '/contribute/documentation' }
+        ]
       }
     ],
 
