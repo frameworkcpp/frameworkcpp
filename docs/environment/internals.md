@@ -61,8 +61,9 @@ struct retired_t {             // a superseded cell waiting to be recycled
 struct view_t {                // one per thread
     std::uint64_t my_version;  // how far this cache has caught up
     std::uint64_t published;   // my_version, published to the reclaimer
-    std::uint32_t active;      // set on thread exit
-    value_cell_t *cached[];    // indexed by key_id
+    std::uint32_t active;      // 1 while a thread owns the slot, 0 when free
+    // a trailing value_cell_t* cache (one per key_id) follows in memory and is
+    // reached through cached_slots(view); no [0]/[1] member in C++20
 };
 ```
 
@@ -82,7 +83,6 @@ struct control_t {
     retired_t                   *retired;     // [retire_cap], FIFO
     view_t                     **views;       // [max_threads]
     std::atomic<std::uint64_t>   version;     // committed updates (monotonic)
-    std::atomic<std::size_t>     next_view;   // view allocator
     std::atomic<std::size_t>     retire_head; // FIFO cursors
     std::atomic<std::size_t>     retire_tail;
     // sizes + masks..., std::mutex writer
@@ -127,12 +127,13 @@ exists also **retires** the previous cell.
 const std::uint64_t v = control->version.load(acquire);
 if (view->my_version != v)
     sync_view(control, view, v);          // catch up
-value_cell_t *cell = view->cached[id];
+value_cell_t **cache = cached_slots(view);
+value_cell_t *cell = cache[id];
 if (cell == nullptr) {                    // key new to this thread
     cell = control->global[id].load(acquire);
-    view->cached[id] = cell;
+    cache[id] = cell;
 }
-std::atomic_ref(view->published).store(view->my_version, release);
+publish(view);                            // store published only if it moved
 ```
 
 `sync_view` replays only the missed slots, using the tag as a commit gate:
@@ -144,7 +145,7 @@ for (v in [my, target)) {
     if (t1 != v + 1) { reseed(view); return; }   // slot was overwritten by a wrap
     read key_id, value;
     if (slot.tag.load(acquire) != t1) { reseed(view); return; } // raced a writer
-    view->cached[key_id] = value;
+        cached_slots(view)[key_id] = value;
 }
 view->my_version = target;
 ```
@@ -164,14 +165,18 @@ than it:
 
 ```cpp
 min = version;                          // no active views -> everything is free
-for (view in active_views) min = min(min, view->published);
+for (slot in views[0..max_threads))     // scan the pool; active flag filters
+    if (slot.active) min = min(min, slot.published);
 while (fifo not empty && fifo.front().retired_version < min)
     free(fifo.pop_front());
 ```
 
-A view publishes its version at the end of every `get_env` and is marked
-inactive when its thread exits (a `thread_local` guard, keyed by an init/shutdown
-epoch so it never touches a dead arena).
+Views are a fixed pool: a thread claims a free slot (`active` 0→1) with a CAS
+the first time it touches the store, and the slot is marked inactive again when
+its thread exits, so slots are recycled rather than burned. A view re-publishes
+its version to the reclaimer only when it actually advanced, so the steady-state
+read path touches no shared atomic beyond the `version` load. The `thread_local`
+guard is keyed by an init/shutdown epoch, so it never touches a dead arena.
 
 ## Lifetime of a returned view
 

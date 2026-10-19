@@ -17,6 +17,10 @@
 namespace frameworkcpp::environment {
 namespace {
 
+// The per-thread cache is a trailing array; the header alone must never be
+// mistaken for a whole view object.
+static_assert(detail::view_object_bytes(4) > sizeof(detail::view_t));
+
 arena::arena_t make_arena(std::size_t bytes = 16 * 1024 * 1024) {
     arena::arena_config_t config;
     config.size = bytes;
@@ -258,12 +262,46 @@ TEST_F(EnvironmentTest, StatsReportUsage) {
     EXPECT_EQ(stats.keys_used, 0U);
     EXPECT_EQ(stats.total_updates, 0U);
     EXPECT_EQ(stats.retired_pending, 0U);
+    EXPECT_EQ(stats.max_threads, config.max_threads);
+    EXPECT_EQ(stats.active_views, 0U);
 
     ASSERT_TRUE(set_env("FC_S1", "a"));
     ASSERT_TRUE(set_env("FC_S2", "b"));
     stats = environment_stats();
     EXPECT_EQ(stats.keys_used, 2U);
     EXPECT_EQ(stats.total_updates, 2U);
+}
+
+TEST_F(EnvironmentTest, RecyclesViewSlotsAcrossThreads) {
+    environment_config_t config;
+    config.read_process_env = false;
+    config.max_keys = 4;
+    config.journal_size = 8;
+    config.max_threads = 1;
+    auto arena = make_arena();
+    init(arena, nullptr, config);
+    ASSERT_TRUE(set_env("FC_V", "value"));
+
+    std::atomic<bool> held{false};
+    std::atomic<bool> release{false};
+    std::thread holder([&] {
+        (void) get_env("FC_V", ""); // claims the only view slot
+        held.store(true, std::memory_order_release);
+        while (!release.load(std::memory_order_acquire))
+            std::this_thread::yield();
+    });
+    while (!held.load(std::memory_order_acquire))
+        std::this_thread::yield();
+    EXPECT_EQ(environment_stats().active_views, 1U);
+
+    release.store(true, std::memory_order_release);
+    holder.join();
+    EXPECT_EQ(environment_stats().active_views, 0U); // freed on thread exit
+
+    // The recycled slot is claimable again: a thread that ran before does not
+    // leak a slot forever, it hands it back on exit.
+    EXPECT_EQ(get_env("FC_V", ""), "value");
+    EXPECT_EQ(environment_stats().active_views, 1U);
 }
 
 } // namespace

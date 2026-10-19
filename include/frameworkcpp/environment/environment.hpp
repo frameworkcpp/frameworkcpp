@@ -46,7 +46,6 @@ struct control_t {
     retired_t *retired;                   // [retire_capacity], ring
     view_t **views;                       // [max_threads], pre-allocated
     std::atomic<std::uint64_t> version;
-    std::atomic<std::size_t> next_view;
     std::atomic<std::size_t> retire_head;
     std::atomic<std::size_t> retire_tail;
     std::size_t slots;
@@ -257,6 +256,7 @@ struct view_slot_guard {
 
     view_t *view = nullptr;
     std::uint64_t epoch = 0;
+    std::uint64_t published = 0;
 };
 
 inline view_slot_guard &tls_guard() noexcept {
@@ -264,14 +264,27 @@ inline view_slot_guard &tls_guard() noexcept {
     return guard;
 }
 
-inline void clear_cache(control_t *control, view_t *view) {
-    for (std::size_t i = 0; i < control->slots; ++i)
-        view->cached[i] = nullptr;
+// Refresh the version this thread advertises to the reclaimer, but only when it
+// actually moved. On the steady-state read path nothing changed, so no shared
+// atomic is touched.
+inline void publish_view(view_t *view, view_slot_guard &guard) {
+    if (guard.published == view->my_version)
+        return;
+    std::atomic_ref<std::uint64_t>(view->published)
+        .store(view->my_version, std::memory_order_release);
+    guard.published = view->my_version;
 }
 
-// One pre-allocated view per thread. Views are carved once at init and handed
-// out by index; a thread never frees one, it just marks it inactive on exit so
-// the reclaimer stops waiting for it.
+inline void clear_cache(control_t *control, view_t *view) {
+    value_cell_t **slots = cached_slots(view);
+    for (std::size_t i = 0; i < control->slots; ++i)
+        slots[i] = nullptr;
+}
+
+// One pre-allocated view per thread. A thread without one claims a free slot
+// (active == 0) with a CAS; on exit the slot is marked inactive again, so slots
+// are recycled instead of burned. Claiming happens once per thread, never on the
+// read path.
 inline view_t *thread_view(control_t *control) {
     view_slot_guard &guard = tls_guard();
     const std::uint64_t epoch = epoch_ref().load(std::memory_order_relaxed);
@@ -279,17 +292,26 @@ inline view_t *thread_view(control_t *control) {
         return guard.view;
     guard.view = nullptr;
     guard.epoch = epoch;
-    const std::size_t index = control->next_view.fetch_add(1, std::memory_order_relaxed);
-    if (index >= control->max_threads)
-        return nullptr;
-    view_t *view = control->views[index];
-    clear_cache(control, view);
-    view->my_version = control->version.load(std::memory_order_acquire);
-    std::atomic_ref<std::uint64_t>(view->published)
-        .store(view->my_version, std::memory_order_release);
-    std::atomic_ref<std::uint32_t>(view->active).store(1, std::memory_order_release);
-    guard.view = view;
-    return guard.view;
+    guard.published = 0;
+    for (std::size_t i = 0; i < control->max_threads; ++i) {
+        view_t *view = control->views[i];
+        std::uint32_t expected = 0;
+        if (!std::atomic_ref<std::uint32_t>(view->active)
+                 .compare_exchange_strong(
+                     expected, 1, std::memory_order_acq_rel, std::memory_order_relaxed))
+            continue;
+        clear_cache(control, view);
+        view->my_version = control->version.load(std::memory_order_acquire);
+        // A reclaimer that reads this slot before we publish sees the previous
+        // owner's version, which is never newer than ours, so it stays
+        // conservative. Publish, then hand the view to the thread.
+        guard.published = view->my_version;
+        std::atomic_ref<std::uint64_t>(view->published)
+            .store(view->my_version, std::memory_order_release);
+        guard.view = view;
+        return guard.view;
+    }
+    return nullptr;
 }
 
 inline void reseed_view(control_t *control, view_t *view, std::uint64_t target) {
@@ -320,7 +342,7 @@ inline void sync_view(control_t *control, view_t *view, std::uint64_t target) {
             reseed_view(control, view, target);
             return;
         }
-        view->cached[key_id] = cell;
+        cached_slots(view)[key_id] = cell;
     }
     view->my_version = target;
 }
@@ -330,9 +352,7 @@ inline void sync_view(control_t *control, view_t *view, std::uint64_t target) {
 // once every active view has published a version greater than r.
 inline void reclaim(control_t *control) {
     std::uint64_t min_version = control->version.load(std::memory_order_relaxed);
-    const std::size_t count = control->next_view.load(std::memory_order_relaxed);
-    const std::size_t limit = count < control->max_threads ? count : control->max_threads;
-    for (std::size_t i = 0; i < limit; ++i) {
+    for (std::size_t i = 0; i < control->max_threads; ++i) {
         view_t *view = control->views[i];
         if (std::atomic_ref<std::uint32_t>(view->active).load(std::memory_order_acquire) == 0)
             continue;
@@ -491,6 +511,8 @@ struct environment_stats_t {
     std::uint64_t total_updates = 0;
     std::size_t journal_size = 0;
     std::size_t retired_pending = 0;
+    std::size_t max_threads = 0;
+    std::size_t active_views = 0;
 };
 
 [[nodiscard]] inline environment_stats_t environment_stats() noexcept {
@@ -500,10 +522,16 @@ struct environment_stats_t {
     environment_stats_t stats;
     stats.max_keys = control->max_keys;
     stats.journal_size = control->journal_size;
+    stats.max_threads = control->max_threads;
     stats.total_updates = control->version.load(std::memory_order_acquire);
     for (std::size_t i = 0; i < control->slots; ++i) {
         if (control->key_table[i].load(std::memory_order_acquire) != nullptr)
             ++stats.keys_used;
+    }
+    for (std::size_t i = 0; i < control->max_threads; ++i) {
+        if (std::atomic_ref<std::uint32_t>(control->views[i]->active)
+                .load(std::memory_order_acquire) != 0)
+            ++stats.active_views;
     }
     const std::size_t head = control->retire_head.load(std::memory_order_acquire);
     const std::size_t tail = control->retire_tail.load(std::memory_order_acquire);
@@ -563,13 +591,13 @@ struct environment_entry_t {
     const std::uint64_t version = control->version.load(std::memory_order_acquire);
     if (view->my_version != version)
         detail::sync_view(control, view, version);
-    detail::value_cell_t *cell = view->cached[id];
+    detail::value_cell_t **slots = detail::cached_slots(view);
+    detail::value_cell_t *cell = slots[id];
     if (cell == nullptr) {
         cell = control->global[id].load(std::memory_order_acquire);
-        view->cached[id] = cell;
+        slots[id] = cell;
     }
-    std::atomic_ref<std::uint64_t>(view->published)
-        .store(view->my_version, std::memory_order_release);
+    detail::publish_view(view, detail::tls_guard());
     return cell != nullptr ? detail::as_view(cell) : fallback;
 }
 
@@ -619,13 +647,18 @@ inline bool set_env(std::string_view name, std::string_view value) {
     }
 
     // Keep the writer's own view current so it never pins retired cells.
-    const detail::view_slot_guard &guard = detail::tls_guard();
+    detail::view_slot_guard &guard = detail::tls_guard();
     if (guard.view != nullptr &&
-        guard.epoch == detail::epoch_ref().load(std::memory_order_relaxed) &&
-        guard.view->my_version != control->version.load(std::memory_order_relaxed))
-        detail::sync_view(control, guard.view, version + 1);
+        guard.epoch == detail::epoch_ref().load(std::memory_order_relaxed)) {
+        if (guard.view->my_version != control->version.load(std::memory_order_relaxed))
+            detail::sync_view(control, guard.view, version + 1);
+        detail::publish_view(guard.view, guard);
+    }
 
-    detail::reclaim(control);
+    // The cell retired above is the only new garbage; nothing to reclaim when
+    // the key had no previous value.
+    if (old != nullptr)
+        detail::reclaim(control);
     return true;
 }
 
