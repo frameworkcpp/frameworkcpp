@@ -219,7 +219,7 @@ inline void load_dotenv(control_t *control, const char *path) {
   const int _file_k = ::open(path, O_RDONLY);
   if (_file_k < 0)
     return;
-  struct stat _info{};
+  struct stat _info = {};
   if (::fstat(_file_k, &_info) != 0 || _info.st_size <= 0) {
     ::close(_file_k);
     return;
