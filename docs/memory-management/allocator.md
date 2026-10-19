@@ -5,17 +5,17 @@ The arena talks the standard allocator language, so it can power `std::vector`,
 all backed by arena memory.
 
 ```cpp
-#include <frameworkcpp/arena/arena_allocator.hpp>   // arena_allocator<T> + arena_memory_resource
+#include <frameworkcpp/arena/arena_allocator.hpp>   // arena_allocator_t<T> + arena_memory_resource_t
 #include <frameworkcpp/arena/arena.hpp>             // to build the arena in the examples
 ```
 
 ## The standard allocator
 
-`arena_allocator<T>` satisfies `std::allocator_traits`:
+`arena_allocator_t<T>` satisfies `std::allocator_traits`:
 
 ```cpp
-arena_allocator<int> alloc{shard};
-std::vector<int, arena_allocator<int>> values(alloc);
+arena_allocator_t<int> alloc{shard};
+std::vector<int, arena_allocator_t<int>> values(alloc);
 for (int i = 0; i < 100; ++i) values.push_back(i);
 ```
 
@@ -33,10 +33,10 @@ for (int i = 0; i < 100; ++i) values.push_back(i);
 
 ## PMR
 
-`arena_memory_resource` is a `std::pmr::memory_resource` over a shard:
+`arena_memory_resource_t` is a `std::pmr::memory_resource` over a shard:
 
 ```cpp
-arena_memory_resource resource{shard};
+arena_memory_resource_t resource{shard};
 std::pmr::vector<std::uint64_t> values{
     std::pmr::polymorphic_allocator<std::uint64_t>(&resource)};
 for (std::uint64_t i = 0; i < 200; ++i) values.push_back(i);
@@ -49,5 +49,5 @@ interchangeable.
 
 - A bucket block is a single fixed-size allocation. A growing container needs a
   block big enough for its peak, or allocation throws `std::bad_alloc`.
-- Blocks are reused in place: keep `object_size` large enough for the biggest
+- Blocks are reused in place: keep `object_size_` large enough for the biggest
   data you will write into any single block.

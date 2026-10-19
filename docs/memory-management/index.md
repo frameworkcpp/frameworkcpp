@@ -52,7 +52,7 @@ one later aborts the program.
 
 An arena can be capped. You set a **soft limit** (a warning watermark) and a
 **hard limit** (the hard ceiling). Growing past the soft limit warns; growing
-past the hard limit throws `arena_overflow_error` (or aborts, if you configure
+past the hard limit throws `arena_overflow_exception` (or aborts, if you configure
 it). See [Configuration](configuration) for the details.
 
 ## The headers

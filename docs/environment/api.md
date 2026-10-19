@@ -16,11 +16,11 @@ void shutdown() noexcept;
                                        std::string_view fallback);
 bool set_env(std::string_view key, std::string_view value);
 
-struct environment_entry_t { std::string_view key; std::string_view value; };
-[[nodiscard]] std::size_t environment_keys(environment_entry_t *out,
-                                           std::size_t capacity) noexcept;
+struct environment_entry_t { std::string_view key_; std::string_view value_; };
+[[nodiscard]] std::size_t get_environment_keys(environment_entry_t *out,
+                                               std::size_t capacity) noexcept;
 
-std::size_t environment_footprint(const environment_config_t &config);
+std::size_t get_environment_footprint(const environment_config_t &config);
 
 }
 ```
@@ -61,8 +61,8 @@ Publishes a new value for `key`, creating the key if it does not exist yet.
 
 - Returns `true` on success.
 - Returns `false` — **never throws** — when the module is uninitialized, when
-  the key is empty or longer than `max_key_len`, when the value is longer than
-  `max_value_len`, when the key space is full, or when the value pool is
+  the key is empty or longer than `max_key_len_`, when the value is longer than
+  `max_value_len_`, when the key space is full, or when the value pool is
   momentarily pinned by lagging readers. Treat `false` as "your write did not
   happen".
 - Writes are last-writer-wins: two concurrent `set_env` calls on the same key
@@ -78,11 +78,11 @@ Updates are effectively unbounded: a superseded value cell is retired and later
 recycled once no live reader can still see it, so repeated writes reuse the same
 fixed pool of cells instead of draining a budget.
 
-## environment_keys
+## get_environment_keys
 
 ```cpp
-[[nodiscard]] std::size_t environment_keys(environment_entry_t *out,
-                                           std::size_t capacity) noexcept;
+[[nodiscard]] std::size_t get_environment_keys(environment_entry_t *out,
+                                               std::size_t capacity) noexcept;
 ```
 
 Copies up to `capacity` key/value pairs into `out` and returns how many were
@@ -92,19 +92,19 @@ later `set_env`. Returns `0` when the module is uninitialized or `out` is null.
 
 ```cpp
 environment_entry_t entries[64];
-const std::size_t n = environment_keys(entries, 64);
+const std::size_t n = get_environment_keys(entries, 64);
 for (std::size_t i = 0; i < n; ++i) std::printf("%.*s=%.*s\n",
-    (int)entries[i].key.size(), entries[i].key.data(),
-    (int)entries[i].value.size(), entries[i].value.data());
+    (int)entries[i].key_.size(), entries[i].key_.data(),
+    (int)entries[i].value_.size(), entries[i].value_.data());
 ```
 
 This is an introspection helper, not a hot path: it walks the whole key table,
 so a real-time loop should still know its keys by name.
 
-## environment_footprint
+## get_environment_footprint
 
 ```cpp
-std::size_t environment_footprint(const environment_config_t &config);
+std::size_t get_environment_footprint(const environment_config_t &config);
 ```
 
 Returns how many bytes the module's shard will occupy for a given
@@ -113,7 +113,7 @@ configuration. Use it to size the arena so the module is guaranteed to fit:
 ```cpp
 environment::environment_config_t config;
 arena::arena_config_t arena_config;
-arena_config.size = environment::environment_footprint(config) + (64 * 1024);
+arena_config.size_ = environment::get_environment_footprint(config) + (64 * 1024);
 arena::arena_t arena{arena_config};
 environment::init(arena, "app.env", config);
 ```
@@ -126,8 +126,8 @@ footprint itself is exact.
 - **No deletion**: there is no `unset_env`. Removing a key would need
   reclamation, and reclamation fights immutability. Model "absent" with a value
   instead.
-- **No enumeration on the hot path**: `environment_keys` exists for debugging and
-  export, but it walks the whole table. A real-time loop should know its keys by
-  name, not walk a map.
+- **No enumeration on the hot path**: `get_environment_keys` exists for debugging
+  and export, but it walks the whole table. A real-time loop should know its keys
+  by name, not walk a map.
 - **No exceptions on the hot path**: `get_env` and `set_env` never throw; only
   `init` does, and only at setup.

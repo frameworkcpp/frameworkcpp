@@ -82,7 +82,7 @@ global owner lookup.
 ## Grabbing a bucket directly
 
 ```cpp
-arena_bucket_t get_bucket(std::uint64_t tag, concurrency_model model);
+arena_bucket_t get_bucket(std::uint64_t tag, concurrency_model_t model);
 ```
 
 `get_bucket(tag, model)` hands you a handle to one specific bucket and fixes
@@ -92,10 +92,10 @@ tag fixes the model for good.
 ## Diagnostics
 
 ```cpp
-std::uint32_t  bucket_count() const noexcept; // buckets in this shard
-bucket_stats_t stats(std::uint32_t index) const noexcept; // in_use / freed per bucket
-std::uint64_t  tag() const noexcept;
-std::uint32_t  shard_id() const noexcept;
+std::uint32_t  get_bucket_count() const noexcept; // buckets in this shard
+bucket_stats_t get_stats(std::uint32_t index) const noexcept; // in_use_ / freed_ per bucket
+std::uint64_t  get_tag() const noexcept;
+std::uint32_t  get_shard_id() const noexcept;
 explicit operator bool() const noexcept;      // false = the shard does not exist
 ```
 
@@ -113,5 +113,5 @@ auto* slot = shard.allocate<std::uint32_t>();
 *slot = 42;
 
 shard.deallocate(slot);                      // back to the bucket, reusable
-std::cout << shard.stats(0).freed << "\n";   // 1
+std::cout << shard.get_stats(0).freed_ << "\n";   // 1
 ```

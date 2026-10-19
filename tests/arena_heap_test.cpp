@@ -36,94 +36,94 @@ namespace frameworkcpp::arena::test {
 // the ptr/allocator helpers must all be heap-free. Disabled under ASan/TSan,
 // whose runtimes define their own operator new/delete.
 void *operator new(std::size_t size) {
-    ++g_allocations;
-    // NOLINTNEXTLINE(cppcoreguidelines-no-malloc) -- counting hook forwards to the real heap
-    if (void *p = std::malloc(size); p != nullptr)
-        return p;
-    throw std::bad_alloc();
+  ++g_allocations;
+  // NOLINTNEXTLINE(cppcoreguidelines-no-malloc) -- counting hook forwards to the real heap
+  if (void *_pointer = std::malloc(size); _pointer != nullptr)
+    return _pointer;
+  throw std::bad_alloc();
 }
 
 void *operator new[](std::size_t size) {
-    ++g_allocations;
-    // NOLINTNEXTLINE(cppcoreguidelines-no-malloc) -- counting hook forwards to the real heap
-    if (void *p = std::malloc(size); p != nullptr)
-        return p;
-    throw std::bad_alloc();
+  ++g_allocations;
+  // NOLINTNEXTLINE(cppcoreguidelines-no-malloc) -- counting hook forwards to the real heap
+  if (void *_pointer = std::malloc(size); _pointer != nullptr)
+    return _pointer;
+  throw std::bad_alloc();
 }
 
-void operator delete(void *p) noexcept {
-    // NOLINTNEXTLINE(cppcoreguidelines-no-malloc) -- counting hook mirrors operator new
-    std::free(p);
+void operator delete(void *pointer) noexcept {
+  // NOLINTNEXTLINE(cppcoreguidelines-no-malloc) -- counting hook mirrors operator new
+  std::free(pointer);
 }
-void operator delete[](void *p) noexcept {
-    // NOLINTNEXTLINE(cppcoreguidelines-no-malloc) -- counting hook mirrors operator new[]
-    std::free(p);
+void operator delete[](void *pointer) noexcept {
+  // NOLINTNEXTLINE(cppcoreguidelines-no-malloc) -- counting hook mirrors operator new[]
+  std::free(pointer);
 }
-void operator delete(void *p, [[maybe_unused]] std::size_t size) noexcept {
-    // NOLINTNEXTLINE(cppcoreguidelines-no-malloc) -- counting hook mirrors operator new
-    std::free(p);
+void operator delete(void *pointer, [[maybe_unused]] std::size_t size) noexcept {
+  // NOLINTNEXTLINE(cppcoreguidelines-no-malloc) -- counting hook mirrors operator new
+  std::free(pointer);
 }
-void operator delete[](void *p, [[maybe_unused]] std::size_t size) noexcept {
-    // NOLINTNEXTLINE(cppcoreguidelines-no-malloc) -- counting hook mirrors operator new[]
-    std::free(p);
+void operator delete[](void *pointer, [[maybe_unused]] std::size_t size) noexcept {
+  // NOLINTNEXTLINE(cppcoreguidelines-no-malloc) -- counting hook mirrors operator new[]
+  std::free(pointer);
 }
 
 namespace frameworkcpp::arena::test {
 #endif
 
-struct heap_holder {
-    std::uint32_t value = 0;
-};
+struct heap_holder_t {
+  std::uint32_t value_ = 0;
+}; // struct heap_holder_t
 
 TEST(ArenaHeap, NoHeapOnShardCarveAndOps) {
-    const auto before = g_allocations.load(std::memory_order_relaxed);
+  const auto _before_k = g_allocations.load(std::memory_order_relaxed);
 
-    arena_config_t config;
-    config.size = 256 * 1024;
-    arena_t arena{config};
+  arena_config_t _config;
+  _config.size_ = 256 * 1024;
+  arena_t _arena{_config};
 
-    auto shard = arena.create_shard(1,
+  auto _shard = _arena.create_shard(1,
                                     {{0, 64, alignof(std::max_align_t), 128},
-                                     {1, sizeof(heap_holder), alignof(heap_holder), 8}});
+                                     {1, sizeof(heap_holder_t), alignof(heap_holder_t), 8}});
 
-    ASSERT_TRUE(static_cast<bool>(shard));
+  ASSERT_TRUE(static_cast<bool>(_shard));
 
-    auto *a = shard.allocate<std::uint32_t>();
-    ASSERT_NE(a, nullptr);
-    *a = 42;
-    shard.deallocate(a);
+  auto *_pointer = _shard.allocate<std::uint32_t>();
+  ASSERT_NE(_pointer, nullptr);
+  *_pointer = 42;
+  _shard.deallocate(_pointer);
 
-    auto p = make_arena_unique_ptr<heap_holder>(shard);
-    ASSERT_TRUE(static_cast<bool>(p));
+  auto _unique = make_arena_unique_ptr<heap_holder_t>(_shard);
+  ASSERT_TRUE(static_cast<bool>(_unique));
 
-    auto s = make_arena_shared_ptr<int>(shard, 7);
-    ASSERT_TRUE(static_cast<bool>(s));
-    EXPECT_EQ(*s, 7);
+  auto _shared = make_arena_shared_ptr<int>(_shard, 7);
+  ASSERT_TRUE(static_cast<bool>(_shared));
+  EXPECT_EQ(*_shared, 7);
 
-    arena_allocator<int> alloc{shard};
-    auto *vec_mem = alloc.allocate(3);
-    EXPECT_NE(vec_mem, nullptr);
-    alloc.deallocate(vec_mem, 3);
+  arena_allocator_t<int> _allocator{_shard};
+  auto *_vector_memory = _allocator.allocate(3);
+  EXPECT_NE(_vector_memory, nullptr);
+  _allocator.deallocate(_vector_memory, 3);
 
-    EXPECT_EQ(arena.soft_limit_exceeded(), false);
-    EXPECT_EQ(g_allocations.load(std::memory_order_relaxed), before);
+  EXPECT_EQ(_arena.is_soft_limit_exceeded(), false);
+  EXPECT_EQ(g_allocations.load(std::memory_order_relaxed), _before_k);
 }
 
 TEST(ArenaHeap, NoHeapOnMultiRegionGrowth) {
-    const auto before = g_allocations.load(std::memory_order_relaxed);
+  const auto _before_k = g_allocations.load(std::memory_order_relaxed);
 
-    arena_config_t config;
-    config.size = 4096; // tiny first region -> each big shard forces a new mmap
-    arena_t arena{config};
+  arena_config_t _config;
+  _config.size_ = 4096; // tiny first region -> each big shard forces a new mmap
+  arena_t _arena{_config};
 
-    for (std::uint64_t i = 0; i < 16; ++i) {
-        auto shard = arena.create_shard(i, {{0, 256, alignof(std::uint32_t), 256}});
-        ASSERT_TRUE(static_cast<bool>(shard));
-    }
+  for (std::uint64_t _index = 0; _index < 16; ++_index) {
+    auto _shard = _arena.create_shard(_index, {{0, 256, alignof(std::uint32_t), 256}});
+    ASSERT_TRUE(static_cast<bool>(_shard));
+  }
 
-    EXPECT_EQ(arena.shard_count(), 16U);
-    EXPECT_GT(arena.capacity(), config.size);
-    EXPECT_EQ(g_allocations.load(std::memory_order_relaxed), before);
+  EXPECT_EQ(_arena.get_shard_count(), 16U);
+  EXPECT_GT(_arena.get_capacity(), _config.size_);
+  EXPECT_EQ(g_allocations.load(std::memory_order_relaxed), _before_k);
 }
 
 } // namespace frameworkcpp::arena::test

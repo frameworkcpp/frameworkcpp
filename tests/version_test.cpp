@@ -9,26 +9,26 @@ namespace frameworkcpp::environment {
 namespace {
 
 TEST(VersionTest, Major) {
-    EXPECT_EQ(version_major(), 1);
+  EXPECT_EQ(get_version_major(), 1);
 }
 
 TEST(VersionTest, Minor) {
-    EXPECT_EQ(version_minor(), 0);
+  EXPECT_EQ(get_version_minor(), 0);
 }
 
 TEST(VersionTest, Patch) {
-    EXPECT_EQ(version_patch(), 0);
+  EXPECT_EQ(get_version_patch(), 0);
 }
 
 TEST(VersionTest, String) {
-    EXPECT_STREQ(version_string(), "1.0.0");
+  EXPECT_STREQ(get_version_string(), "1.0.0");
 }
 
 TEST(VersionTest, ArenaMatchesEnvironment) {
-    EXPECT_EQ(arena::version_major(), version_major());
-    EXPECT_EQ(arena::version_minor(), version_minor());
-    EXPECT_EQ(arena::version_patch(), version_patch());
-    EXPECT_STREQ(arena::version_string(), version_string());
+  EXPECT_EQ(arena::get_version_major(), get_version_major());
+  EXPECT_EQ(arena::get_version_minor(), get_version_minor());
+  EXPECT_EQ(arena::get_version_patch(), get_version_patch());
+  EXPECT_STREQ(arena::get_version_string(), get_version_string());
 }
 
 } // namespace

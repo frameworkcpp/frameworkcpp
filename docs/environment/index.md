@@ -77,6 +77,6 @@ full mechanism.
 Read them top to bottom — each page builds on the previous one:
 
 - [Lifecycle](lifecycle) — `init`, `shutdown`, process-vs-file precedence and the threading rules.
-- [The API](api) — `get_env`, `set_env`, `environment_footprint` and their semantics.
+- [The API](api) — `get_env`, `set_env`, `get_environment_footprint` and their semantics.
 - [Internals](internals) — the key table, value cells, journal, per-thread views and the version protocol.
 - [Configuration](configuration) — the fixed capacities and how to size the arena.
