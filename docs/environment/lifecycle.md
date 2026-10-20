@@ -7,8 +7,7 @@ decided at `init` — nothing grows later.
 ```cpp
 #include <frameworkcpp/environment/environment.hpp>
 
-void init(arena::arena_t &arena, const char *dotenv_path,
-          const environment_config_t &config = {});
+void init(arena::arena_t &arena, const environment_config_t &config = {});
 void shutdown() noexcept;
 ```
 
@@ -21,7 +20,8 @@ void shutdown() noexcept;
    journal and the view storage. If the arena has no room, it throws
    `std::runtime_error` (and `std::invalid_argument` if a capacity is zero).
 3. Loads the **process environment** first (unless `read_process_env_` is off).
-4. Loads the **dotenv file** after, filling only keys that are still unset.
+4. Loads the **dotenv file** after (if `dotenv_path_` is set), filling only
+   keys that are still unset.
 
 ### Precedence: the process wins
 
@@ -47,7 +47,8 @@ To add specific defaults without inheriting everything:
 ```cpp
 environment_config_t config;
 config.read_process_env_ = false;        // start from an empty store
-environment::init(arena, "app.env", config);
+config.dotenv_path_ = "app.env";         // defaults live in the file
+environment::init(arena, config);
 environment::set_env("LOG_LEVEL", "info"); // explicit defaults
 ```
 
@@ -72,7 +73,7 @@ memory, and unmapping it is the arena's job. Call `shutdown` after every thread
 has stopped using the module and before the arena goes away.
 
 ```cpp
-environment::init(arena, "app.env");
+environment::init(arena);
 // ... run your system ...
 environment::shutdown();
 // arena is destroyed later, reclaiming all module memory at once

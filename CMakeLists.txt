@@ -14,6 +14,15 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(FRAMEWORKCPP_BUILD_TESTING "Build tests" ON)
 
+# El módulo reactor usa io_uring a través de liburing. Se puede desactivar si
+# la plataforma no lo soporta.
+option(FRAMEWORKCPP_ENABLE_REACTOR "Build the io_uring based reactor module" ON)
+find_library(FRAMEWORKCPP_URING_LIBRARY NAMES uring)
+if(FRAMEWORKCPP_ENABLE_REACTOR AND NOT FRAMEWORKCPP_URING_LIBRARY)
+    message(WARNING "FRAMEWORKCPP_ENABLE_REACTOR=ON but liburing was not found")
+    set(FRAMEWORKCPP_ENABLE_REACTOR OFF)
+endif()
+
 # core framework library (header-only). Sub-modules such as `env` live under
 # include/frameworkcpp/<module>/ and share the same target.
 add_library(frameworkcpp INTERFACE)
@@ -108,6 +117,14 @@ if(FRAMEWORKCPP_BUILD_TESTING)
     target_compile_features(frameworkcpp_environment_heap_test PRIVATE cxx_std_20)
     gtest_discover_tests(frameworkcpp_environment_heap_test)
 
+    add_executable(frameworkcpp_reactor_test tests/reactor_test.cpp)
+    target_link_libraries(frameworkcpp_reactor_test PRIVATE frameworkcpp GTest::gtest_main)
+    target_compile_features(frameworkcpp_reactor_test PRIVATE cxx_std_20)
+    if(FRAMEWORKCPP_URING_LIBRARY)
+        target_link_libraries(frameworkcpp_reactor_test PRIVATE ${FRAMEWORKCPP_URING_LIBRARY})
+    endif()
+    gtest_discover_tests(frameworkcpp_reactor_test)
+
     add_executable(frameworkcpp_umbrella_test tests/umbrella_test.cpp)
     target_link_libraries(frameworkcpp_umbrella_test PRIVATE frameworkcpp GTest::gtest_main)
     target_compile_features(frameworkcpp_umbrella_test PRIVATE cxx_std_20)
@@ -125,6 +142,7 @@ if(FRAMEWORKCPP_BUILD_TESTING)
                 frameworkcpp_arena_allocator_test
                 frameworkcpp_environment_test
                 frameworkcpp_environment_heap_test
+                frameworkcpp_reactor_test
                 frameworkcpp_umbrella_test
                 PROPERTIES CXX_CLANG_TIDY "${_frameworkcpp_clang_tidy}"
             )

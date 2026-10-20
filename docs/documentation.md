@@ -17,6 +17,7 @@ and it keeps growing.
 | --- | --- | --- |
 | Memory | documented | [Memory](/memory/) |
 | Environment | documented | [Environment](/environment/) |
+| Reactor | documented | [Reactor](/reactor/) |
 | More | planned | — |
 
 ## Writing a page

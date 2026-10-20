@@ -15,6 +15,7 @@ pull in only the ones you use.
 flowchart TD
     fc["FrameworkCpp — header-only C++20"] --> mem["memory — arena, shards, buckets, smart pointers"]
     fc --> env["environment — dotenv-style config on the arena"]
+    fc --> rea["reactor — io_uring event loops on the arena"]
     fc --> more["more modules — planned"]
 ```
 
@@ -24,6 +25,8 @@ flowchart TD
 - CMake 3.23 or newer — only to build the tests, not to use the headers.
 - A POSIX system: the memory module uses `mmap`, so Linux is the target by
   design.
+- `liburing` and its headers, if you use the reactor module. It is the only
+  module with an external dependency.
 
 ## Using it as a header-only library
 
@@ -102,6 +105,8 @@ the idea first, then the pieces, then the details.
   concurrency models and smart pointers.
 - [Environment](/environment/) — a dotenv-style configuration store built on top
   of the memory module.
+- [Reactor](/reactor/) — io_uring event loops with lock-free queues and
+  arena-carved memory.
 
 More modules are on the way, and the menu grows with them. If you want to write
 a page yourself, start with [Writing Documentation](/contribute/documentation).

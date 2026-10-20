@@ -45,7 +45,7 @@ class environment_test_t : public ::testing::Test {
 TEST_F(environment_test_t, ReadsProcessEnvironmentAndFallback) {
   ::setenv("FC_ENV_TEST_KEY", "from_process", 1);
   auto _arena = make_arena();
-  init(_arena, nullptr);
+  init(_arena);
   EXPECT_EQ(get_env("FC_ENV_TEST_KEY", "fallback"), "from_process");
   EXPECT_EQ(get_env("FC_ENV_TEST_MISSING", "fallback"), "fallback");
 }
@@ -54,7 +54,9 @@ TEST_F(environment_test_t, ProcessWinsOverFile) {
   ::setenv("FC_ENV_TEST_KEY", "from_process", 1);
   const auto _path_k = write_dotenv("FC_ENV_TEST_KEY=from_file\nFC_ENV_FILE_ONLY=file_value\n");
   auto _arena = make_arena();
-  init(_arena, _path_k.c_str());
+  environment_config_t _cfg_k;
+  _cfg_k.dotenv_path_ = _path_k.c_str();
+  init(_arena, _cfg_k);
   EXPECT_EQ(get_env("FC_ENV_TEST_KEY", ""), "from_process");
   EXPECT_EQ(get_env("FC_ENV_FILE_ONLY", ""), "file_value");
   ::unlink(_path_k.c_str());
@@ -62,7 +64,7 @@ TEST_F(environment_test_t, ProcessWinsOverFile) {
 
 TEST_F(environment_test_t, SetEnvOverridesAndCreates) {
   auto _arena = make_arena();
-  init(_arena, nullptr);
+  init(_arena);
   EXPECT_EQ(get_env("FC_NEW", "default"), "default");
   EXPECT_TRUE(set_env("FC_NEW", "one"));
   EXPECT_EQ(get_env("FC_NEW", "default"), "one");
@@ -78,7 +80,7 @@ TEST_F(environment_test_t, RecyclesCellsWhileAReaderPinsThem) {
   _config.journal_size_ = 8;
   _config.max_threads_ = 4;
   auto _arena = make_arena();
-  init(_arena, nullptr, _config);
+  init(_arena, _config);
   ASSERT_TRUE(set_env("FC_R", "seed"));
 
   std::atomic<bool> _pinned{false};
@@ -121,7 +123,7 @@ TEST_F(environment_test_t, ExhaustsKeys) {
   _config.max_value_len_ = 32;
   _config.read_process_env_ = false;
   auto _arena = make_arena();
-  init(_arena, nullptr, _config);
+  init(_arena, _config);
   EXPECT_TRUE(set_env("FC_K1", "a"));
   EXPECT_TRUE(set_env("FC_K2", "b"));
   EXPECT_FALSE(set_env("FC_K3", "c"));
@@ -130,14 +132,14 @@ TEST_F(environment_test_t, ExhaustsKeys) {
 TEST_F(environment_test_t, FootprintFitsShard) {
   const environment_config_t _config_k;
   auto _arena = make_arena(get_environment_footprint(_config_k) + 4096);
-  init(_arena, nullptr, _config_k);
+  init(_arena, _config_k);
   EXPECT_TRUE(set_env("FC_FOOTPRINT", "ok"));
   EXPECT_EQ(get_env("FC_FOOTPRINT", ""), "ok");
 }
 
 TEST_F(environment_test_t, ThreadsSeeTheirOwnWrite) {
   auto _arena = make_arena();
-  init(_arena, nullptr);
+  init(_arena);
   ASSERT_TRUE(set_env("FC_SHARED", "initial"));
 
   std::string _seen;
@@ -156,7 +158,7 @@ TEST_F(environment_test_t, ConcurrentReadersStayCoherent) {
   _config.journal_size_ = 64;
   _config.max_threads_ = 32;
   auto _arena = make_arena();
-  init(_arena, nullptr, _config);
+  init(_arena, _config);
   ASSERT_TRUE(set_env("FC_HOT", "value-0"));
 
   std::atomic<bool> _stop{false};
@@ -208,7 +210,7 @@ TEST_F(environment_test_t, BudgetIsConstexpr) {
 
   // And the derived budget actually works at runtime.
   auto _arena = arena::arena_t{get_environment_arena_config(_config_k)};
-  init(_arena, nullptr, _config_k);
+  init(_arena, _config_k);
   EXPECT_TRUE(set_env("FC_BUDGET", "ok"));
   EXPECT_EQ(get_env("FC_BUDGET", ""), "ok");
 }
@@ -218,7 +220,7 @@ TEST_F(environment_test_t, EnumeratesKeys) {
   _config.read_process_env_ = false;
   _config.max_keys_ = 8;
   auto _arena = make_arena();
-  init(_arena, nullptr, _config);
+  init(_arena, _config);
   ASSERT_TRUE(set_env("FC_A", "1"));
   ASSERT_TRUE(set_env("FC_B", "2"));
 
@@ -237,7 +239,7 @@ TEST_F(environment_test_t, EnumerateRespectsCapacityAndNull) {
   _config.read_process_env_ = false;
   _config.max_keys_ = 8;
   auto _arena = make_arena();
-  init(_arena, nullptr, _config);
+  init(_arena, _config);
   ASSERT_TRUE(set_env("FC_X", "1"));
   ASSERT_TRUE(set_env("FC_Y", "2"));
   ASSERT_TRUE(set_env("FC_Z", "3"));
@@ -254,7 +256,7 @@ TEST_F(environment_test_t, StatsReportUsage) {
   _config.value_cells_ = 3;
   _config.journal_size_ = 8;
   auto _arena = make_arena();
-  init(_arena, nullptr, _config);
+  init(_arena, _config);
 
   auto _stats = get_environment_stats();
   EXPECT_EQ(_stats.max_keys_, 4U);
@@ -279,7 +281,7 @@ TEST_F(environment_test_t, RecyclesViewSlotsAcrossThreads) {
   _config.journal_size_ = 8;
   _config.max_threads_ = 1;
   auto _arena = make_arena();
-  init(_arena, nullptr, _config);
+  init(_arena, _config);
   ASSERT_TRUE(set_env("FC_V", "value"));
 
   std::atomic<bool> _held{false};

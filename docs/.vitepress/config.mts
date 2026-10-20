@@ -30,6 +30,7 @@ export default defineConfig({
           { text: 'Buckets', link: '/memory/arena-bucket' },
           { text: 'Smart Pointers', link: '/memory/smart-pointers' },
           { text: 'Allocators & std::pmr', link: '/memory/allocator' },
+          { text: 'Memory Reservation', link: '/memory/reservation' },
           { text: 'Configuration', link: '/memory/configuration' }
         ]
       },
@@ -41,6 +42,15 @@ export default defineConfig({
           { text: 'The API', link: '/environment/api' },
           { text: 'Internals', link: '/environment/internals' },
           { text: 'Configuration', link: '/environment/configuration' }
+        ]
+      },
+      {
+        text: 'Reactor',
+        items: [
+          { text: 'Overview', link: '/reactor/' },
+          { text: 'The API', link: '/reactor/api' },
+          { text: 'Internals', link: '/reactor/internals' },
+          { text: 'Configuration', link: '/reactor/configuration' }
         ]
       },
       {

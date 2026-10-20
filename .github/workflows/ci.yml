@@ -25,7 +25,7 @@ jobs:
       - name: Install clang tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq clang-format clang-tidy
+          sudo apt-get install -y -qq clang-format clang-tidy liburing-dev
 
       - name: Configure
         run: cmake --preset debug
@@ -41,6 +41,25 @@ jobs:
             '-warnings-as-errors=*' \
             --header-filter='include/frameworkcpp/.*' \
             tests/*.cpp
+
+  # Verifica las garantias de tiempo real en las arquitecturas que el CI emula.
+  # El emulador de QEMU solo puede compilar: este job usa los cross
+  # toolchains y evalua los static_assert que dependen de la arquitectura (por
+  # ejemplo, que los atomicos de 64 bits del hot path sean lock-free).
+  cross-check:
+    name: cross-check
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install the cross compilation headers
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq liburing-dev
+
+      - name: Check the real-time invariants on every architecture
+        run: ./tools/cross-check.sh
 
   # One job per (architecture, build type). Every job runs inside an Ubuntu
   # container of the target architecture, emulated via QEMU (binfmt) for the
@@ -77,6 +96,10 @@ jobs:
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
+        with:
+          # Tag fijo: el comportamiento del emulador no debe depender de un
+          # tag movil.
+          image: tonistiigi/binfmt:qemu-v10.2.3
 
       - name: Map platform
         id: map
@@ -107,7 +130,7 @@ jobs:
             bash -euxo pipefail -c '
               export DEBIAN_FRONTEND=noninteractive
               apt-get update -qq
-              apt-get install -y -qq cmake ninja-build g++ clang
+              apt-get install -y -qq cmake ninja-build g++ clang liburing-dev
               cmake --preset "$CONFIG"
               cmake --build --preset "$CONFIG"
               if [ "$CONFIG" = tsan ]; then
@@ -143,6 +166,10 @@ jobs:
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
+        with:
+          # Tag fijo: el comportamiento del emulador no debe depender de un
+          # tag movil.
+          image: tonistiigi/binfmt:qemu-v10.2.3
 
       - name: Map platform
         id: map
@@ -170,7 +197,7 @@ jobs:
             bash -euxo pipefail -c '
               export DEBIAN_FRONTEND=noninteractive
               apt-get update -qq
-              apt-get install -y -qq cmake ninja-build g++ rpm zip
+              apt-get install -y -qq cmake ninja-build g++ rpm zip liburing-dev
               cmake --preset release -DFRAMEWORKCPP_BUILD_TESTING=OFF
               cmake --build --preset release
               cmake --build --preset release --target package
@@ -209,6 +236,10 @@ jobs:
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
+        with:
+          # Tag fijo: el comportamiento del emulador no debe depender de un
+          # tag movil.
+          image: tonistiigi/binfmt:qemu-v10.2.3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3

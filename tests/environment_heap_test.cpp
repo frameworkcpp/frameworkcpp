@@ -75,7 +75,7 @@ TEST(EnvironmentHeap, InitAndOpsAreHeapFree) {
   arena::arena_t _arena{_arena_config};
 
   const environment_config_t _config_k;
-  init(_arena, nullptr, _config_k);
+  init(_arena, _config_k);
 
   ASSERT_EQ(get_env("FC_HEAP_MISSING", "fallback"), "fallback");
   ASSERT_TRUE(set_env("FC_HEAP_KEY", "value-one"));
