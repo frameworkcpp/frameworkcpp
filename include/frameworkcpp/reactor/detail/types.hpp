@@ -17,6 +17,7 @@ enum class op_kind_t : std::uint8_t {
   sendto_ = 6,
   recvfrom_ = 7,
   cancel_ = 8,
+  close_ = 9,
 }; // enum class op_kind_t
 
 struct op_result_t {

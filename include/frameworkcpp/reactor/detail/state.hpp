@@ -69,6 +69,8 @@ struct socket_slot_t {
   std::uint32_t interest_ = 0;
   // El descriptor se cierra cuando termine la operacion en vuelo.
   std::atomic<bool> close_pending_{false};
+  // El socket ya fue cerrado: cierra de nuevo no hace nada.
+  std::atomic<bool> closed_{false};
 }; // struct socket_slot_t
 
 struct reactor_state_t {

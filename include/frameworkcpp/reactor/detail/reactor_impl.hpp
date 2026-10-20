@@ -246,6 +246,7 @@ inline socket_t reactor_t::create_socket(int fd, queue_t *queue) const noexcept 
   for (std::size_t _index = 0; _index < state_.num_sockets_; ++_index) {
     if (state_.sockets_[_index].fd_ < 0) {
       state_.sockets_[_index].fd_ = fd;
+      state_.sockets_[_index].closed_.store(false, std::memory_order_release);
       state_.sockets_[_index].queue_ = queue;
       state_.sockets_[_index].socket_id_ = _index + 1;
       _socket.fd_ = fd;
@@ -885,6 +886,21 @@ inline void reactor_t::execute_op(detail::queue_control_t *qc, detail::op_t *op)
     }
     return;
   }
+  if (op->kind_ == op_kind_t::close_) {
+    if (op->socket_id_ != 0 && op->socket_id_ <= qc->num_sockets_) {
+      detail::socket_slot_t *_slot = &qc->sockets_[op->socket_id_ - 1];
+      if (_slot->pending_read_.load(std::memory_order_acquire) == nullptr &&
+          _slot->pending_write_.load(std::memory_order_acquire) == nullptr) {
+        // No queda nada en vuelo: el descriptor se puede cerrar ya.
+        if (_slot->fd_ >= 0)
+          ::close(_slot->fd_);
+        _slot->fd_ = -1;
+        _slot->close_pending_.store(false, std::memory_order_release);
+      }
+    }
+    op->done_.store(true, std::memory_order_release);
+    return;
+  }
   if (op->kind_ == op_kind_t::cancel_) {
     for (std::size_t _index = 0; _index < qc->timers_segment_size_; ++_index) {
       detail::op_t *_timer = &qc->timers_segment_[_index];
@@ -1204,23 +1220,41 @@ inline bool socket_t::recv_from(
   return post_op(op_kind_t::recvfrom_, buffer, len, fn, ctx, strand_id);
 }
 
-inline void socket_t::close() noexcept {
+inline bool socket_t::close() noexcept {
   if (fd_ < 0)
-    return;
+    return true;
   detail::socket_slot_t *_slot = slot();
-  const bool _busy_k =
-      (_slot != nullptr) && (_slot->pending_read_ != nullptr || _slot->pending_write_ != nullptr);
-  if (_busy_k) {
-    // Hay una operacion en vuelo: el descriptor se cierra cuando termine, en
-    // el hilo de la queue. El socket queda invalido desde ahora.
-    _slot->close_pending_.store(true, std::memory_order_release);
+  if (_slot == nullptr) {
+    ::close(fd_);
     fd_ = -1;
-    return;
+    return true;
   }
-  ::close(fd_);
+  // Cerrar dos veces la misma socket no debe cerrar un descriptor ajeno.
+  if (_slot->closed_.exchange(true, std::memory_order_acq_rel)) {
+    fd_ = -1;
+    return true;
+  }
   fd_ = -1;
-  if (_slot != nullptr)
-    _slot->fd_ = -1;
+
+  // El descriptor lo cierra el hilo de la queue: cerrarlo desde aqui
+  // competiria con la queue que lo esta usando, y el slot se modificaria
+  // desde dos hilos a la vez.
+  detail::queue_control_t *_qc = queue_->control_;
+  detail::op_t *_op = acquire_op(_qc->ops_segment_, _qc->ops_segment_size_);
+  if (_op == nullptr)
+    return false;
+  _op->kind_ = op_kind_t::close_;
+  _op->socket_id_ = id_;
+  _op->fn_ = nullptr;
+  _op->ctx_ = nullptr;
+  _op->strand_id_ = 0;
+  _op->next_ = nullptr;
+  if (!_qc->op_queue_.push(_op)) {
+    _op->done_.store(true, std::memory_order_release);
+    return false;
+  }
+  _slot->close_pending_.store(true, std::memory_order_release);
+  return true;
 }
 
 } // namespace frameworkcpp::reactor

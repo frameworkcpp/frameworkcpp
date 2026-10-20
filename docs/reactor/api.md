@@ -310,8 +310,16 @@ Each posts one operation and returns whether it was queued.
 - `accept` completes with the peer address in the handler's `result`.
 - `connect` needs the address to outlive the operation; copy it into your own
   storage if it is temporary.
-- `close` closes the descriptor. Operations already in flight will fail with
-  `EBADF` or complete with an error.
+- `close` asks the queue to close the descriptor. The queue's thread does it,
+  never the caller: closing a descriptor while the queue is using it would be
+  a race, and it would leave the pending operation without an owner.
+- Closing a socket with an operation in flight is therefore safe: the
+  descriptor stays open until the operation finishes, and then the queue closes
+  it and releases the slot.
+- Closing the same socket twice is harmless: the second call does nothing, so
+  it cannot close an unrelated descriptor.
+- The descriptor belongs to the reactor after `close`. Do not close it again
+  yourself.
 
 ## run_all and stop_all
 

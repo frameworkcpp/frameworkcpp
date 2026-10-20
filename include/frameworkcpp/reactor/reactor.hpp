@@ -145,7 +145,7 @@ class socket_t {
   // Dirección del último datagrama recibido.
   [[nodiscard]] const sockaddr *last_peer() const noexcept;
 
-  void close() noexcept;
+  bool close() noexcept;
 
   private:
   [[nodiscard]] detail::socket_slot_t *slot() const noexcept;

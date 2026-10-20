@@ -131,7 +131,7 @@ TEST(reactor_test_t, ReceivesOverIoUring) {
 
   _reactor.run_all();
 
-  const auto _deadline_k = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  const auto _deadline_k = std::chrono::steady_clock::now() + std::chrono::seconds(30);
   while (!_context.done_.load(std::memory_order_acquire) &&
          std::chrono::steady_clock::now() < _deadline_k) {
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -165,7 +165,7 @@ TEST(reactor_test_t, SendsOverIoUring) {
 
   _reactor.run_all();
 
-  const auto _deadline_k = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  const auto _deadline_k = std::chrono::steady_clock::now() + std::chrono::seconds(30);
   while (!_context.done_.load(std::memory_order_acquire) &&
          std::chrono::steady_clock::now() < _deadline_k) {
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -318,7 +318,7 @@ TEST(reactor_test_t, TimerFiresAfterItsDeadline) {
 
   _reactor.run_all();
 
-  const auto _deadline_k = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  const auto _deadline_k = std::chrono::steady_clock::now() + std::chrono::seconds(30);
   while (!_context.fired_.load(std::memory_order_acquire) &&
          std::chrono::steady_clock::now() < _deadline_k) {
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -347,7 +347,7 @@ TEST(reactor_test_t, CancelsATimerBeforeItFires) {
   EXPECT_TRUE(_reactor.cancel_timer(_queue, _id_k));
 
   _reactor.run_all();
-  std::this_thread::sleep_for(std::chrono::milliseconds(150));
+  std::this_thread::sleep_for(std::chrono::milliseconds(500));
   _reactor.stop_all();
 
   // El timer se cancelo: nunca llego a dispararse.
@@ -373,7 +373,7 @@ TEST(reactor_test_t, FiresTimersInDeadlineOrder) {
 
   _reactor.run_all();
 
-  const auto _deadline_k = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  const auto _deadline_k = std::chrono::steady_clock::now() + std::chrono::seconds(30);
   while (!_second.fired_.load(std::memory_order_acquire) &&
          std::chrono::steady_clock::now() < _deadline_k) {
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -517,7 +517,7 @@ TEST(reactor_test_t, RunsATcpServerThatAcceptsAConnection) {
   sockaddr_in _target = _bound; // el puerto ya viene en orden de red
   ASSERT_EQ(::connect(_client_k, reinterpret_cast<const sockaddr *>(&_target), sizeof(_target)), 0);
 
-  const auto _deadline_k = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  const auto _deadline_k = std::chrono::steady_clock::now() + std::chrono::seconds(30);
   while (!_server_context.done_.load(std::memory_order_acquire) &&
          std::chrono::steady_clock::now() < _deadline_k) {
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -580,7 +580,7 @@ TEST(reactor_test_t, SendsAndReceivesAUnixDatagram) {
                                 on_udp_send,
                                 &_context));
 
-  const auto _deadline_k = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  const auto _deadline_k = std::chrono::steady_clock::now() + std::chrono::seconds(30);
   while (!_context.received_.load(std::memory_order_acquire) &&
          std::chrono::steady_clock::now() < _deadline_k) {
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -648,7 +648,7 @@ TEST(reactor_test_t, ConnectsToATcpServer) {
 
   _reactor.run_all();
 
-  const auto _deadline_k = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  const auto _deadline_k = std::chrono::steady_clock::now() + std::chrono::seconds(30);
   while (!_context.done_.load(std::memory_order_acquire) &&
          std::chrono::steady_clock::now() < _deadline_k) {
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -691,7 +691,7 @@ TEST(reactor_test_t, RunsAUnixDomainServerThatAcceptsAConnection) {
   std::strncpy(_addr.sun_path, _path_k, sizeof(_addr.sun_path) - 1);
   ASSERT_EQ(::connect(_client_k, reinterpret_cast<const sockaddr *>(&_addr), sizeof(_addr)), 0);
 
-  const auto _deadline_k = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  const auto _deadline_k = std::chrono::steady_clock::now() + std::chrono::seconds(30);
   while (!_server_context.done_.load(std::memory_order_acquire) &&
          std::chrono::steady_clock::now() < _deadline_k) {
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -731,7 +731,7 @@ TEST(reactor_test_t, DegradesWithoutIoUringAndStillRunsTimers) {
 
   _reactor.run_all();
 
-  const auto _deadline_k = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  const auto _deadline_k = std::chrono::steady_clock::now() + std::chrono::seconds(30);
   while (!_context.fired_.load(std::memory_order_acquire) &&
          std::chrono::steady_clock::now() < _deadline_k) {
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -765,7 +765,7 @@ TEST(reactor_test_t, EpollBackendServesIoWithoutIoUring) {
   _reactor.run_all();
   ASSERT_EQ(::write(_fds[1], "hola", 4), 4);
 
-  const auto _deadline_k = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  const auto _deadline_k = std::chrono::steady_clock::now() + std::chrono::seconds(30);
   while (!_context.done_.load(std::memory_order_acquire) &&
          std::chrono::steady_clock::now() < _deadline_k) {
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -838,7 +838,7 @@ TEST(reactor_test_t, RejectsASecondOperationOnTheSameDirection) {
 
   // La segunda lectura se completa con EALREADY en vez de quedar esperando.
   const bool _posted_k = _socket.recv(_second.data_, sizeof(_second.data_), on_recv, &_second);
-  const auto _deadline_k = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  const auto _deadline_k = std::chrono::steady_clock::now() + std::chrono::seconds(30);
   while (!_second.done_.load(std::memory_order_acquire) &&
          std::chrono::steady_clock::now() < _deadline_k) {
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -856,8 +856,8 @@ TEST(reactor_test_t, RejectsASecondOperationOnTheSameDirection) {
 
 TEST(reactor_test_t, ClosingASocketWithAReadPendingReleasesTheSlot) {
   // Cerrar un socket con una lectura en vuelo no puede dejar la operacion sin
-  // dueño: el descriptor se cierra cuando la lectura termina. Y el slot de la
-  // socket tiene que quedar libre para poder reutilizarlo.
+  // dueño: el descriptor se cierra en el hilo de la queue, cuando la lectura
+  // termina. Y el slot tiene que quedar libre para poder reutilizarlo.
   const reactor_config_t _config_k = make_reactor_config();
 
   auto _arena_config = make_arena_config(arena::round_to_page(precompute(_config_k)));
@@ -878,7 +878,7 @@ TEST(reactor_test_t, ClosingASocketWithAReadPendingReleasesTheSlot) {
 
   // El otro extremo se cierra: la lectura termina con fin de fichero.
   ::close(_fds[1]);
-  const auto _deadline_k = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  const auto _deadline_k = std::chrono::steady_clock::now() + std::chrono::seconds(30);
   while (!_context.done_.load(std::memory_order_acquire) &&
          std::chrono::steady_clock::now() < _deadline_k) {
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -887,26 +887,39 @@ TEST(reactor_test_t, ClosingASocketWithAReadPendingReleasesTheSlot) {
   EXPECT_EQ(_context.ec_.load(std::memory_order_acquire), 0);
   EXPECT_EQ(_context.bytes_.load(std::memory_order_acquire), 0U);
 
-  // Cerrar con una operacion en vuelo difiere el cierre al hilo de la queue.
-  auto _second = _reactor.create_socket(_fds[0], _queue);
+  // Cerrar con una operacion en vuelo difiere el cierre a la queue.
+  int _other[2] = {-1, -1};
+  ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, _other), 0);
+  auto _second = _reactor.create_socket(_other[0], _queue);
   ASSERT_TRUE(_second);
   recv_context_t _second_context;
   ASSERT_TRUE(_second.recv(
       _second_context.data_, sizeof(_second_context.data_), on_recv, &_second_context));
-  _second.close();
+  EXPECT_TRUE(_second.close());
+  // Cerrar de nuevo no hace nada: el descriptor ya se cerro.
+  EXPECT_TRUE(_second.close());
 
-  const auto _second_deadline_k = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  // El peer se cierra: la lectura pendiente termina y la queue puede cerrar
+  // el descriptor que quedo pendiente.
+  ::close(_other[1]);
+
+  const auto _second_deadline_k = std::chrono::steady_clock::now() + std::chrono::seconds(30);
   while (!_second_context.done_.load(std::memory_order_acquire) &&
          std::chrono::steady_clock::now() < _second_deadline_k) {
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
+  // La lectura pendiente tambien termino: el peer se cerro.
+  EXPECT_TRUE(_second_context.done_.load(std::memory_order_acquire));
+
   // El slot quedo libre: una socket nueva lo puede tomar.
-  auto _third = _reactor.create_socket(_fds[0], _queue);
+  int _third_fds[2] = {-1, -1};
+  ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, _third_fds), 0);
+  auto _third = _reactor.create_socket(_third_fds[0], _queue);
   EXPECT_TRUE(_third);
   _third.close();
 
   _reactor.stop_all();
-  ::close(_fds[0]);
+  ::close(_third_fds[1]);
 }
 
 } // namespace

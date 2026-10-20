@@ -53,6 +53,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Install the cross compilation headers
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq liburing-dev
+
       - name: Check the real-time invariants on every architecture
         run: ./tools/cross-check.sh
 

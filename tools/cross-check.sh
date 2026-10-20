@@ -75,10 +75,29 @@ fetch() {
     dpkg-deb -x "$_deb" "${_dir}/root"
   done
   # liburing solo se usa en compilacion: sus cabeceras son independientes de la
-  # arquitectura, asi que las del host sirven.
+  # arquitectura, asi que las del host sirven. SeSacan del paquete; si el
+  # paquete no se puede descargar, se baja el header suelto del upstream.
   if [ ! -f "${_dir}/root/uring/usr/include/liburing.h" ]; then
-    ( cd "${_dir}" && apt-get download -q liburing-dev >/dev/null 2>&1 )
-    dpkg-deb -x "${_dir}"/liburing-dev_*.deb "${_dir}/root/uring"
+    ( cd "${_dir}" && apt-get download -q liburing-dev >/dev/null 2>&1 ) || true
+    for _deb in "${_dir}"/liburing-dev_*.deb; do
+      [ -f "${_deb}" ] && dpkg-deb -x "${_deb}" "${_dir}/root/uring"
+    done
+  fi
+  if [ ! -f "${_dir}/root/uring/usr/include/liburing.h" ] && [ -f /usr/include/liburing.h ]; then
+    mkdir -p "${_dir}/root/uring/usr/include"
+    cp /usr/include/liburing.h "${_dir}/root/uring/usr/include/liburing.h"
+  fi
+  if [ ! -f "${_dir}/root/uring/usr/include/liburing.h" ]; then
+    mkdir -p "${_dir}/root/uring/usr/include"
+    if command -v curl >/dev/null 2>&1; then
+      curl -fsSL -o "${_dir}/root/uring/usr/include/liburing.h" \
+        "https://raw.githubusercontent.com/axboe/liburing/liburing-2.9/src/include/liburing.h" \
+        || true
+    fi
+  fi
+  if [ ! -f "${_dir}/root/uring/usr/include/liburing.h" ]; then
+    echo "no se pudo obtener liburing.h" >&2
+    return 1
   fi
 }
 
@@ -115,6 +134,10 @@ compile() {
 main() {
   local -a _wanted=("$@")
   local _failures=0
+
+  # `apt-get download` no actualiza el indice: sin esto el paquete puede no
+  # aparecer aunque este en los repositorios.
+  apt-get update -qq >/dev/null 2>&1 || true
 
   for _entry in "${TARGETS[@]}"; do
     IFS=: read -r _target _prefix _triplet <<<"${_entry}"
