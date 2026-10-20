@@ -183,6 +183,10 @@ everywhere, and what does differ per architecture — the size of the
 atomic is lock-free — is checked at compile time on every architecture in the
 matrix, with `static_assert`.
 
+`tools/cross-check.sh` compiles the framework for the four emulated
+architectures and lets the compiler of each one answer. It runs in seconds and
+needs neither root nor emulation.
+
 ## The trade-offs
 
 - **The queue depth is fixed.** `max_jobs_per_queue_` operations can be in

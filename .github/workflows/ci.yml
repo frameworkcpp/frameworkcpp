@@ -42,6 +42,20 @@ jobs:
             --header-filter='include/frameworkcpp/.*' \
             tests/*.cpp
 
+  # Verifica las garantias de tiempo real en las arquitecturas que el CI emula.
+  # El emulador de QEMU solo puede compilar: este job usa los cross
+  # toolchains y evalua los static_assert que dependen de la arquitectura (por
+  # ejemplo, que los atomicos de 64 bits del hot path sean lock-free).
+  cross-check:
+    name: cross-check
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check the real-time invariants on every architecture
+        run: ./tools/cross-check.sh
+
   # One job per (architecture, build type). Every job runs inside an Ubuntu
   # container of the target architecture, emulated via QEMU (binfmt) for the
   # non-native archs, so all build types are exercised on every architecture.

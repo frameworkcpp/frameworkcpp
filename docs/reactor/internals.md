@@ -199,6 +199,29 @@ memory you pay for once, at compile time, out of the arena — and a queue's
 operation pool is sized by `max_jobs_per_queue_`, so a system that does not
 need datagrams can keep that number small.
 
+## What the architecture has to guarantee
+
+The hot path promises two things: no locks and no allocation. Both depend on
+the target architecture, so the framework states them as compile-time facts
+instead of assuming them:
+
+```cpp
+static_assert(std::atomic<std::size_t>::is_always_lock_free,
+              "the operation ring needs lock-free size_t atomics");
+static_assert(std::atomic<std::uint64_t>::is_always_lock_free,
+              "the reactor needs lock-free 64-bit atomics");
+```
+
+On a 64-bit architecture this is free. On a 32-bit one it is not: a 64-bit
+atomic without an exclusive-access instruction falls back to a library call
+that takes a lock, and the promise would be a lie. `armv7` has
+`LDREXD`/`STREXD` and keeps it; `armv6` would not.
+
+The `tools/cross-check.sh` script compiles the framework for `armv7`, `s390x`,
+`riscv64` and `ppc64le` — the architectures the CI emulates — and the
+compiler answers the question on each of them. It needs no root and no
+emulation, so it runs in seconds instead of the hours an emulated build takes.
+
 ## What is not implemented yet
 - **Automatic rebalancing.** `rebalance()` is a call you make; the reactor does
   not run it on a schedule on its own.
