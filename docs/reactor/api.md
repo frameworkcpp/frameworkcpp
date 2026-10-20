@@ -1,0 +1,179 @@
+# The API
+
+Everything the reactor exposes, in the order you will meet it.
+
+```cpp
+namespace frameworkcpp::reactor {
+
+enum class op_kind_t { accept_, recv_, send_, connect_, timer_, custom_ };
+
+struct op_result_t {
+    int ec_;             // 0 on success, errno on failure
+    std::size_t bytes_;  // bytes transferred
+};
+
+using reactor_fn_t = void (*)(void *ctx, const op_result_t &result);
+
+class reactor_t {
+  public:
+    reactor_t() = default;
+    reactor_t(const reactor_t &) = delete;
+    reactor_t &operator=(const reactor_t &) = delete;
+    ~reactor_t();
+
+    bool bind_arena(arena::arena_t &arena, const reactor_config_t &config) noexcept;
+    [[nodiscard]] bool initialized() const noexcept;
+
+    queue_t *get_or_create(std::string_view name) noexcept;
+    socket_t create_socket(int fd, queue_t *queue) noexcept;
+
+    void run_all() noexcept;
+    void stop_all() noexcept;
+
+    static constexpr std::size_t precompute(const reactor_config_t &config) noexcept;
+};
+
+}
+```
+
+## bind_arena
+
+```cpp
+bool bind_arena(arena::arena_t &arena, const reactor_config_t &config) noexcept;
+```
+
+Carves the reactor's state out of `arena`: one control block per queue, the
+operation pool, the socket table and the strand table. Call it once, from a
+single thread, before you post anything.
+
+- Returns `false` when the arena has no room for the shard, when an `io_uring`
+  ring cannot be created, or when the reactor is already bound.
+- After it succeeds, `arena.get_used()` has grown by exactly
+  `precompute(config)` bytes.
+- The arena must outlive the reactor.
+
+```cpp
+reactor::reactor_t reactor;
+if (!reactor.bind_arena(arena, config))
+    throw std::runtime_error("reactor: not enough arena");
+```
+
+## get_or_create
+
+```cpp
+queue_t *get_or_create(std::string_view name) noexcept;
+```
+
+Returns the queue called `name`, creating it if this is the first time the name
+appears. Two calls with the same name return the same pointer; two calls with
+different names return different queues.
+
+- Returns `nullptr` when the reactor is not bound, or when the pool of queues is
+  exhausted and the name is new.
+- The name is a `std::string_view`: it is not copied, so it must outlive the
+  reactor.
+
+```cpp
+auto *ingest = reactor.get_or_create("ingest");
+auto *same   = reactor.get_or_create("ingest");   // ingest == same
+```
+
+## create_socket
+
+```cpp
+socket_t create_socket(int fd, queue_t *queue) noexcept;
+```
+
+Registers `fd` with a queue and returns a handle. The reactor does not own the
+descriptor: closing it is your job, or call `socket_t::close()`.
+
+- Returns an invalid socket (falsy) when the fd is negative, the queue is null,
+  or the socket table is full.
+- The socket is not registered with the kernel here. You post the operations;
+  the first `accept`, `recv` or `connect` is what arms the `io_uring` ring.
+
+## queue_t::post
+
+```cpp
+bool post(op_kind_t kind, int fd, void *buffer, std::size_t len,
+          reactor_fn_t fn, void *ctx,
+          std::uint64_t strand_id = 0, int priority = 0) noexcept;
+```
+
+Queues an operation for the queue's thread. `fn` is called with `ctx` and the
+result when the operation completes.
+
+- Returns `false` when the queue's operation pool is exhausted or the queue
+  handle is invalid. It never blocks and never throws.
+- `buffer` must stay valid until the handler runs. Put it in memory you own —
+  the arena, or a structure that outlives the operation.
+- `strand_id` groups operations that must not overlap. `0` means "no strand".
+- `priority` is reserved for future use.
+
+This is the low-level entry point; `socket_t` wraps it for the common cases.
+
+## socket_t
+
+```cpp
+bool recv(void *buffer, std::size_t len, reactor_fn_t fn, void *ctx,
+          std::uint64_t strand_id = 0) noexcept;
+bool send(const void *buffer, std::size_t len, reactor_fn_t fn, void *ctx,
+          std::uint64_t strand_id = 0) noexcept;
+bool accept(reactor_fn_t fn, void *ctx, std::uint64_t strand_id = 0) noexcept;
+bool connect(const sockaddr *addr, std::size_t addr_len, reactor_fn_t fn,
+             void *ctx, std::uint64_t strand_id = 0) noexcept;
+void close() noexcept;
+```
+
+Each posts one operation and returns whether it was queued.
+
+- `recv` and `send` are zero-copy in the sense that matters here: the kernel
+  reads and writes directly into the buffer you pass. Nothing is copied through
+  an intermediate.
+- `accept` completes with the peer address in the handler's `result`.
+- `connect` needs the address to outlive the operation; copy it into your own
+  storage if it is temporary.
+- `close` closes the descriptor. Operations already in flight will fail with
+  `EBADF` or complete with an error.
+
+## run_all and stop_all
+
+```cpp
+void run_all() noexcept;
+void stop_all() noexcept;
+```
+
+`run_all` starts one thread per queue and returns immediately. Each thread
+drains its own operation queue and waits on its own `io_uring` ring with a
+timeout, so it notices a stop request promptly.
+
+`stop_all` signals every queue to stop and joins the threads. It is safe to call
+it when nothing is running, and the destructor calls it for you.
+
+```cpp
+reactor.run_all();
+// ... serve ...
+reactor.stop_all();
+```
+
+## The result
+
+```cpp
+struct op_result_t {
+    int ec_;             // 0 on success, errno on failure
+    std::size_t bytes_;  // bytes transferred
+};
+```
+
+`ec_` is zero on success and a positive `errno` on failure — `-EAGAIN`, `-ECONNREFUSED`,
+`-EBADF`. Check it before you use `bytes_`: a failed operation transfers nothing.
+
+## What you do not get (by design)
+
+- **No closures.** Handlers are function pointers. If you want captured state,
+  put it in a struct and pass its address.
+- **No dynamic allocation.** After `bind_arena`, no path allocates. That
+  includes the operation pool: when it runs dry, `post` returns `false`.
+- **No blocking `post`.** A full pool is reported, not waited on.
+- **No timers yet.** `op_kind_t::timer_` exists in the vocabulary but completes
+  immediately; a real deadline timer is not implemented.

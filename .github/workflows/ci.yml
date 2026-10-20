@@ -25,7 +25,7 @@ jobs:
       - name: Install clang tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq clang-format clang-tidy
+          sudo apt-get install -y -qq clang-format clang-tidy liburing-dev
 
       - name: Configure
         run: cmake --preset debug
@@ -107,7 +107,7 @@ jobs:
             bash -euxo pipefail -c '
               export DEBIAN_FRONTEND=noninteractive
               apt-get update -qq
-              apt-get install -y -qq cmake ninja-build g++ clang
+              apt-get install -y -qq cmake ninja-build g++ clang liburing-dev
               cmake --preset "$CONFIG"
               cmake --build --preset "$CONFIG"
               if [ "$CONFIG" = tsan ]; then
@@ -170,7 +170,7 @@ jobs:
             bash -euxo pipefail -c '
               export DEBIAN_FRONTEND=noninteractive
               apt-get update -qq
-              apt-get install -y -qq cmake ninja-build g++ rpm zip
+              apt-get install -y -qq cmake ninja-build g++ rpm zip liburing-dev
               cmake --preset release -DFRAMEWORKCPP_BUILD_TESTING=OFF
               cmake --build --preset release
               cmake --build --preset release --target package

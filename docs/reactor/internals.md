@@ -1,0 +1,146 @@
+# Internals
+
+The reactor has three moving parts: a ring that talks to the kernel, a pool of
+operations that hands work between threads, and a strand protocol that keeps
+related operations from overlapping.
+
+```mermaid
+flowchart LR
+    producer["any thread"] -->|"post"| pool["operation pool"]
+    pool -->|"lock-free queue"| loop["queue thread"]
+    loop -->|"SQE"| ring["io_uring ring"]
+    kernel["kernel"] -->|"CQE"| ring
+    ring --> loop
+    loop -->|"handler"| producer
+```
+
+## The io_uring ring
+
+Each queue owns one `io_uring` ring, created when the reactor is bound. The
+kernel maps the submission and completion queues into the process, so:
+
+- posting an operation is a write into a shared array — no syscall;
+- waiting for a completion is a read from the kernel's array — no syscall
+  either, unless the kernel has nothing pending, in which case the thread
+  sleeps with a timeout so it can notice a stop request.
+
+That is the whole point of `io_uring` over `epoll`: the kernel batches the
+syscalls, and a batch of one hundred operations costs one syscall instead of a
+hundred.
+
+## The operation pool
+
+Operations are fixed-size records carved from the arena. Each queue owns a
+contiguous segment of the pool, and the queue's own queue of pending operations
+is a ring of pointers into that segment.
+
+The pool is what makes `post` safe on a real-time path: the record already
+exists, so posting an operation is a pointer store, never an allocation.
+
+An operation carries everything the handler needs:
+
+```cpp
+struct op_t {
+    op_kind_t kind_;       // what to do
+    int fd_;               // which socket
+    void *buffer_;         // where the data goes (zero-copy)
+    std::size_t len_;      // how much
+    reactor_fn_t fn_;      // who to call
+    void *ctx_;            // with what
+    std::uint64_t strand_id_;  // serialisation key
+    int priority_;         // reserved
+    op_result_t result_;   // filled in on completion
+    bool done_;            // free when true
+    op_t *next_;           // strand list
+};
+```
+
+`done_` is the free flag. An operation is reusable once its handler has run,
+and the pool is searched linearly for a free one — the pool is small and the
+search stays in cache.
+
+## The handoff between threads
+
+Any thread can post to any queue. The queue's pending operations live in a
+ring with two atomic indices:
+
+```cpp
+class op_queue_t {
+  std::atomic<std::size_t> head_;  // consumer
+  std::atomic<std::size_t> tail_;  // producer
+  op_t **slots_;
+};
+```
+
+The producer publishes by writing the pointer into the slot and then bumping
+`tail_` with a release store; the consumer reads `tail_` with an acquire load
+and bumps `head_`. There is no lock, no condition variable and no allocation.
+The cost is a single atomic store per post.
+
+## The strand protocol
+
+A strand is a serialisation key: operations sharing a `strand_id` must not run
+at the same time.
+
+Each strand holds a list of pending operations and one flag, `busy`:
+
+```cpp
+class strand_t {
+  std::atomic<op_t *> head_;
+  std::atomic<op_t *> tail_;
+  std::atomic<bool> busy_;
+};
+```
+
+The queue's thread is the only one that touches a strand, so the list needs no
+lock. The protocol is simple:
+
+1. `try_dispatch` returns the first pending operation **only if** the strand is
+   not busy, and sets `busy`.
+2. The operation is submitted to `io_uring` and the strand stays busy while it
+   is in flight — that is the part a naive implementation gets wrong. A second
+   operation on the same strand waits for the first to *complete*, not merely to
+   be dispatched.
+3. When the completion arrives, the handler runs and the strand is released.
+
+```mermaid
+flowchart TD
+    op["operation arrives"] --> hasstrand{"strand_id set?"}
+    hasstrand -->|"no"| run["execute now"]
+    hasstrand -->|"yes"| enq["append to the strand list"]
+    enq --> busy{"strand busy?"}
+    busy -->|"yes"| wait["wait for the in-flight op to complete"]
+    wait --> release["completion releases the strand"]
+    release --> busy
+    busy -->|"no"| dispatch["take the head, mark busy"]
+    dispatch --> run
+```
+
+## The memory layout
+
+`bind_arena` carves one shard with six blocks:
+
+| Block | Holds |
+| --- | --- |
+| Queue controls | One per queue: the `io_uring` ring, the operation queue, the strand pointer. |
+| Queue handles | The `queue_t` values you get back from `get_or_create`. |
+| Operations | The pool. Split into contiguous segments, one per queue. |
+| Ring slots | The array of pointers that makes up each queue's pending-operation ring. |
+| Sockets | The socket table. |
+| Strands | The strand table, shared by every queue. |
+
+`precompute(config)` builds the same table of descriptors and asks the arena
+how many bytes it would take, so the number you budget at compile time is the
+number the reactor carves at runtime. The reactor test asserts exactly that.
+
+## What is not implemented yet
+
+- **Affinity.** `affinity_` is accepted and ignored; the threads are not
+  pinned.
+- **Hot migration.** Moving a socket from one queue to another — the piece that
+  would balance connections across threads — is not implemented. The socket
+  table and the queue's ring are already structured for it.
+- **Timers.** `op_kind_t::timer_` completes immediately; there is no deadline
+  timer yet.
+- **UDP, ICMP and Unix sockets.** The `io_uring` operations exist in the
+  vocabulary, but only TCP-style `accept`/`recv`/`send`/`connect` are wired up.
