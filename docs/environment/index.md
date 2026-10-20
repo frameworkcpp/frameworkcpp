@@ -29,10 +29,11 @@ The whole module is header-only and lives in one include:
 
 ## The mental model
 
-1. You build an `arena::arena_t` and call `environment::init(arena, "app.env")`.
+1. You build an `arena::arena_t` and call `environment::init(arena, config)`.
    The module carves its own shard out of the arena and loads the configuration:
-   first the **process environment**, then the **file** — and the process wins,
-   the file only fills keys that are still unset.
+   first the **process environment**, then the **file** named by
+   `config.dotenv_path_` — and the process wins, the file only fills keys that
+   are still unset.
 2. `environment::get_env(key, fallback)` reads. A warmed-up thread compares its
    cached version against the global counter and, if they match, reads its own
    private cache — no shared atomic beyond that one counter, no lock, no heap.
@@ -48,8 +49,11 @@ using namespace frameworkcpp;
 
 int main()
 {
+    environment::environment_config_t config;
+    config.dotenv_path_ = "app.env";              // optional .env file
+
     arena::arena_t arena{arena::arena_config_t{}};
-    environment::init(arena, "app.env");         // process env, then the file
+    environment::init(arena, config);             // process env, then the file
 
     environment::get_env("LOG_LEVEL", "info");   // read (never allocates)
     environment::set_env("LOG_LEVEL", "debug");  // publish a new value

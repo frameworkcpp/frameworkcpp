@@ -18,7 +18,7 @@ TEST(Umbrella, PullsInEveryModule) {
   environment::environment_config_t _config;
   _config.read_process_env_ = false;
   arena::arena_t _env_arena{environment::get_environment_arena_config(_config)};
-  environment::init(_env_arena, nullptr, _config);
+  environment::init(_env_arena, _config);
   EXPECT_TRUE(environment::set_env("FC_UMBRELLA", "ok"));
   EXPECT_EQ(environment::get_env("FC_UMBRELLA", ""), "ok");
   environment::shutdown();

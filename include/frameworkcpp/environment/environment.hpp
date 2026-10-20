@@ -382,8 +382,10 @@ inline void reclaim(control_t *control) {
 // Carve the module's tables into `arena` and load the process environment
 // first (it wins), then the dotenv file for any key still unset. Call once,
 // from a single thread, before spawning readers or writers.
-inline void
-init(arena::arena_t &arena, const char *dotenv_path, const environment_config_t &config = {}) {
+//
+// `dotenv_path` via al config; casi siempre es nullptr, así que se cargan solo
+// las variables de entorno del proceso.
+inline void init(arena::arena_t &arena, const environment_config_t &config = {}) {
   if (detail::control_ref() != nullptr)
     throw std::logic_error("environment already initialized");
   if (config.max_keys_ == 0 || config.max_key_len_ == 0 || config.max_value_len_ == 0 ||
@@ -465,7 +467,7 @@ init(arena::arena_t &arena, const char *dotenv_path, const environment_config_t 
 
   if (config.read_process_env_)
     detail::load_process_env(_control);
-  detail::load_dotenv(_control, dotenv_path);
+  detail::load_dotenv(_control, config.dotenv_path_);
 
   detail::control_ref() = _control;
   detail::epoch_ref().fetch_add(1, std::memory_order_relaxed);
@@ -490,6 +492,20 @@ constexpr std::size_t get_environment_footprint(const environment_config_t &conf
   detail::make_specs(config, _specs, _slots, _retire_capacity);
   return arena::shard_footprint(_specs);
 }
+
+// Contrato estándar de reserva de memoria en tiempo de compilación
+// (véase frameworkcpp/arena/module_memory.hpp).
+constexpr std::size_t precompute(const environment_config_t &config) noexcept {
+  return get_environment_footprint(config);
+}
+
+// Adaptador del módulo al contrato estándar: permite usar
+// arena::make_reservation<environment_module_t>(...) y arena::merge_reservations.
+struct environment_module_t {
+  static constexpr std::size_t precompute(const environment_config_t &config) noexcept {
+    return environment::precompute(config);
+  }
+}; // struct environment_module_t
 
 // The whole arena budget the module needs: its footprint rounded up to a page,
 // plus `extra_bytes` for anything else you carve into the same arena. Feed the

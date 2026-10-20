@@ -9,8 +9,7 @@ namespace frameworkcpp::environment {
 
 struct environment_config_t { /* ... */ };
 
-void init(arena::arena_t &arena, const char *dotenv_path,
-          const environment_config_t &config = {});
+void init(arena::arena_t &arena, const environment_config_t &config = {});
 void shutdown() noexcept;
 
 [[nodiscard]] std::string_view get_env(std::string_view key,
@@ -22,6 +21,7 @@ struct environment_entry_t { std::string_view key_; std::string_view value_; };
                                                std::size_t capacity) noexcept;
 
 std::size_t get_environment_footprint(const environment_config_t &config);
+std::size_t precompute(const environment_config_t &config) noexcept;
 
 }
 ```
@@ -106,6 +106,7 @@ so a real-time loop should still know its keys by name.
 
 ```cpp
 std::size_t get_environment_footprint(const environment_config_t &config);
+std::size_t precompute(const environment_config_t &config) noexcept;
 ```
 
 Returns how many bytes the module's shard will occupy for a given
@@ -116,7 +117,7 @@ environment::environment_config_t config;
 arena::arena_config_t arena_config;
 arena_config.size_ = environment::get_environment_footprint(config) + (64 * 1024);
 arena::arena_t arena{arena_config};
-environment::init(arena, "app.env", config);
+environment::init(arena, config);
 ```
 
 The `+ 64 KiB` is headroom for anything else you carve into the same arena; the

@@ -16,6 +16,7 @@ struct environment_config_t {
     std::size_t journal_size_    = 256;   // delta ring length (power of two)
     std::size_t max_threads_     = 64;    // concurrent per-thread views
     bool        read_process_env_ = true; // inherit the process environment
+    const char *dotenv_path_       = nullptr; // optional .env file to load
 };
 ```
 
@@ -28,9 +29,10 @@ struct environment_config_t {
 | `journal_size_` | Updates in the delta ring. | A reader this far behind reseeds instead of replaying. |
 | `max_threads_` | Per-thread views. | Extra threads still read, just without a private cache. |
 | `read_process_env_` | Whether `init` inherits the process environment. | Set `false` for a file-only, deterministic store. |
+| `dotenv_path_` | The `.env` file to load at `init`. | `nullptr` means "process environment only". |
 
-All fields have sensible defaults, so `init(arena, path)` works with no config
-at all.
+All fields have sensible defaults, so `init(arena)` works with no config at all:
+the store then holds the process environment and nothing else.
 
 ## Unbounded updates, bounded memory
 
@@ -68,7 +70,7 @@ Or get a ready-made `arena_config_t`:
 
 ```cpp
 arena::arena_t arena{environment::get_environment_arena_config(env_k)};
-environment::init(arena, "app.env", env_k);
+environment::init(arena, env_k);
 ```
 
 `get_environment_arena_bytes(config, extra)` is
@@ -80,7 +82,9 @@ shards as `extra`.
 **Development** — accept the defaults:
 
 ```cpp
-environment::init(arena, ".env");
+environment_config_t config;
+config.dotenv_path_ = ".env";
+environment::init(arena, config);
 ```
 
 **Production, file driven** — ignore the host environment and be explicit:
@@ -90,7 +94,8 @@ environment_config_t config;
 config.read_process_env_ = false;
 config.max_keys_ = 128;
 config.value_cells_ = 256;
-environment::init(arena, "/etc/myapp/app.env", config);
+config.dotenv_path_ = "/etc/myapp/app.env";
+environment::init(arena, config);
 ```
 
 **Many short-lived threads** — raise the view pool so each worker keeps its
@@ -99,7 +104,8 @@ cache:
 ```cpp
 environment_config_t config;
 config.max_threads_ = 512;
-environment::init(arena, "app.env", config);
+config.dotenv_path_ = "app.env";
+environment::init(arena, config);
 ```
 
 ## Observing the store
