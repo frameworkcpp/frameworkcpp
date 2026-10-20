@@ -139,7 +139,7 @@ inline bool reactor_t::bind_arena(arena::arena_t &arena, const reactor_config_t 
 
   for (std::size_t _index = 0; _index < _total_timers_k; ++_index) {
     new (static_cast<void *>(&state_.timers_[_index])) detail::op_t();
-    state_.timers_[_index].done_ = true; // libre desde el arranque
+    state_.timers_[_index].done_.store(true, std::memory_order_relaxed); // libre
   }
 
   for (std::size_t _index = 0; _index < config.max_sockets_; ++_index) {
@@ -149,7 +149,7 @@ inline bool reactor_t::bind_arena(arena::arena_t &arena, const reactor_config_t 
 
   for (std::size_t _index = 0; _index < _total_ops_k; ++_index) {
     new (static_cast<void *>(&state_.ops_[_index])) detail::op_t();
-    state_.ops_[_index].done_ = true; // libre desde el arranque
+    state_.ops_[_index].done_.store(true, std::memory_order_relaxed); // libre
   }
 
   for (std::size_t _index = 0; _index < config.queues_; ++_index) {
@@ -265,6 +265,18 @@ inline std::uint64_t monotonic_now_ns() noexcept {
          static_cast<std::uint64_t>(_ts.tv_nsec);
 }
 
+// Toma una operacion libre del segmento. El compare_exchange asegura que dos
+// hilos que posteen a la vez no tomen la misma operacion.
+inline detail::op_t *acquire_op(detail::op_t *segment, std::size_t count) noexcept {
+  for (std::size_t _index = 0; _index < count; ++_index) {
+    bool _expected_k = true;
+    if (segment[_index].done_.compare_exchange_strong(
+            _expected_k, false, std::memory_order_acq_rel))
+      return &segment[_index];
+  }
+  return nullptr;
+}
+
 inline std::uint64_t reactor_t::schedule_timer(queue_t *queue,
                                                std::uint64_t delay_ns,
                                                reactor_fn_t fn,
@@ -275,13 +287,7 @@ inline std::uint64_t reactor_t::schedule_timer(queue_t *queue,
   detail::queue_control_t *_qc = queue->control_;
 
   // Un op libre del segmento de timers de esta queue.
-  detail::op_t *_op = nullptr;
-  for (std::size_t _index = 0; _index < _qc->timers_segment_size_; ++_index) {
-    if (_qc->timers_segment_[_index].done_) {
-      _op = &_qc->timers_segment_[_index];
-      break;
-    }
-  }
+  detail::op_t *_op = acquire_op(_qc->timers_segment_, _qc->timers_segment_size_);
   if (_op == nullptr)
     return 0;
 
@@ -299,13 +305,15 @@ inline std::uint64_t reactor_t::schedule_timer(queue_t *queue,
   _op->next_ = nullptr;
   _op->timer_id_ = _id_k;
   _op->deadline_ns_ = monotonic_now_ns() + delay_ns;
-  _op->done_ = false;
   _op->heap_index_ = 0;
 
-  if (!_qc->timers_.insert(_op)) {
-    _op->done_ = true;
+  // El heap de timers solo lo toca el hilo de la queue: la operacion se
+  // encola y ahi se inserta. Asi el heap no necesita locks.
+  if (!_qc->op_queue_.push(_op)) {
+    _op->done_.store(true, std::memory_order_release);
     return 0;
   }
+  _qc->timers_live_.fetch_add(1, std::memory_order_acq_rel);
   return _id_k;
 }
 
@@ -313,23 +321,31 @@ inline bool reactor_t::cancel_timer(queue_t *queue, std::uint64_t timer_id) cons
   if (!bound_ || queue == nullptr || queue->control_ == nullptr || timer_id == 0)
     return false;
   detail::queue_control_t *_qc = queue->control_;
-  for (std::size_t _index = 0; _index < _qc->timers_segment_size_; ++_index) {
-    detail::op_t *_op = &_qc->timers_segment_[_index];
-    if (_op->done_ || _op->timer_id_ != timer_id)
-      continue;
-    if (_qc->timers_.remove(_op)) {
-      _op->done_ = true;
-      _op->timer_id_ = 0;
-      return true;
-    }
+
+  // El heap de timers solo lo manipula el hilo de la queue, asi que la
+  // cancelacion se encola y se aplica ahi.
+  detail::op_t *_op = acquire_op(_qc->timers_segment_, _qc->timers_segment_size_);
+  if (_op == nullptr)
+    return false;
+  _op->kind_ = op_kind_t::cancel_;
+  _op->timer_id_ = 0;
+  _op->cancel_target_ = timer_id;
+  _op->fn_ = nullptr;
+  _op->ctx_ = nullptr;
+  _op->strand_id_ = 0;
+  _op->socket_id_ = 0;
+  _op->next_ = nullptr;
+  if (!_qc->op_queue_.push(_op)) {
+    _op->done_.store(true, std::memory_order_release);
+    return false;
   }
-  return false;
+  return true;
 }
 
 inline std::size_t reactor_t::get_timer_count(queue_t *queue) const noexcept {
   if (!bound_ || queue == nullptr || queue->control_ == nullptr)
     return 0;
-  return queue->control_->timers_.size();
+  return queue->control_->timers_live_.load(std::memory_order_acquire);
 }
 
 inline std::uint64_t reactor_t::next_timer_id() noexcept {
@@ -500,8 +516,9 @@ inline void reactor_t::expire_timers(detail::queue_control_t *qc) noexcept {
     if (_op->strand_id_ != 0) {
       // Un timer con strand no puede ejecutarse mientras haya otra op del
       // mismo strand en vuelo: entra en la cola del strand y lo despacha el
-      // propio hilo de la queue, igual que cualquier otra operación.
+      // propio hilo de la queue, igual que cualquier otra operacion.
       const auto _strand_index_k = static_cast<std::size_t>(_op->strand_id_ % qc->num_strands_);
+      _op->kind_ = op_kind_t::custom_;
       qc->strands_[_strand_index_k].enqueue(_op);
       continue;
     }
@@ -509,8 +526,9 @@ inline void reactor_t::expire_timers(detail::queue_control_t *qc) noexcept {
     _op->result_.bytes_ = 0;
     if (_op->fn_ != nullptr)
       _op->fn_(_op->ctx_, _op->result_);
-    _op->done_ = true;
+    _op->done_.store(true, std::memory_order_release);
     _op->timer_id_ = 0;
+    qc->timers_live_.fetch_sub(1, std::memory_order_acq_rel);
   }
 }
 
@@ -530,9 +548,9 @@ inline bool is_write_op(op_kind_t kind) noexcept {
 // del socket. Solo lo llama el hilo de la queue.
 inline void update_interest(detail::queue_control_t *qc, detail::socket_slot_t *slot) noexcept {
   std::uint32_t _events = 0;
-  if (slot->pending_read_ != nullptr)
+  if (slot->pending_read_.load(std::memory_order_acquire) != nullptr)
     _events |= EPOLLIN;
-  if (slot->pending_write_ != nullptr)
+  if (slot->pending_write_.load(std::memory_order_acquire) != nullptr)
     _events |= EPOLLOUT;
   if (_events == slot->interest_)
     return;
@@ -567,10 +585,10 @@ inline void finish_op(
   detail::socket_slot_t *_slot = nullptr;
   if (op->socket_id_ != 0 && op->socket_id_ <= qc->num_sockets_) {
     _slot = &qc->sockets_[op->socket_id_ - 1];
-    if (_slot->pending_read_ == op)
-      _slot->pending_read_ = nullptr;
-    if (_slot->pending_write_ == op)
-      _slot->pending_write_ = nullptr;
+    if (_slot->pending_read_.load(std::memory_order_acquire) == op)
+      _slot->pending_read_.store(nullptr, std::memory_order_release);
+    if (_slot->pending_write_.load(std::memory_order_acquire) == op)
+      _slot->pending_write_.store(nullptr, std::memory_order_release);
     // En recvfrom, el kernel dejó la dirección del emisor en el op.
     if (op->kind_ == op_kind_t::recvfrom_) {
       const socklen_t _peer_len_k = op->message_.msg_namelen;
@@ -581,6 +599,16 @@ inline void finish_op(
     }
     if (qc->use_epoll_)
       update_interest(qc, _slot);
+    // Un socket cerrado con una operacion en vuelo mantiene el descriptor
+    // hasta que la operacion termina: cerrarlo antes dejaria la operacion
+    // sin dueño y el slot ocupado para siempre.
+    if (_slot->close_pending_.load(std::memory_order_acquire) &&
+        _slot->pending_read_.load(std::memory_order_acquire) == nullptr &&
+        _slot->pending_write_.load(std::memory_order_acquire) == nullptr) {
+      ::close(_slot->fd_);
+      _slot->fd_ = -1;
+      _slot->close_pending_.store(false, std::memory_order_release);
+    }
   }
 
   if (op->fn_ != nullptr)
@@ -590,7 +618,7 @@ inline void finish_op(
     qc->strands_[_strand_index_k].release();
   }
   release_socket(qc, op->socket_id_);
-  op->done_ = true;
+  op->done_.store(true, std::memory_order_release);
 }
 
 // --- backend io_uring ---
@@ -619,17 +647,15 @@ inline void reactor_t::execute_io_uring_op(detail::queue_control_t *qc, detail::
   detail::socket_slot_t *_slot = nullptr;
   if (op->socket_id_ != 0 && op->socket_id_ <= qc->num_sockets_) {
     _slot = &qc->sockets_[op->socket_id_ - 1];
-    detail::op_t **_pending_k = nullptr;
-    if (is_read_op(op->kind_))
-      _pending_k = &_slot->pending_read_;
-    else if (is_write_op(op->kind_))
-      _pending_k = &_slot->pending_write_;
-    if (_pending_k != nullptr) {
-      if (*_pending_k != nullptr) {
+    const bool _read_k = is_read_op(op->kind_);
+    if (_read_k || is_write_op(op->kind_)) {
+      std::atomic<detail::op_t *> *_pending_k =
+          _read_k ? &_slot->pending_read_ : &_slot->pending_write_;
+      if (_pending_k->load(std::memory_order_acquire) != nullptr) {
         finish_op(qc, op, EALREADY, 0, -1);
         return;
       }
-      *_pending_k = op;
+      _pending_k->store(op, std::memory_order_release);
     }
   }
 
@@ -639,10 +665,10 @@ inline void reactor_t::execute_io_uring_op(detail::queue_control_t *qc, detail::
     // Sin SQE no se puede publicar la operación: vuelve a la cola y su
     // reserva de direccion se suelta.
     if (_slot != nullptr) {
-      if (_slot->pending_read_ == op)
-        _slot->pending_read_ = nullptr;
-      if (_slot->pending_write_ == op)
-        _slot->pending_write_ = nullptr;
+      if (_slot->pending_read_.load(std::memory_order_acquire) == op)
+        _slot->pending_read_.store(nullptr, std::memory_order_release);
+      if (_slot->pending_write_.load(std::memory_order_acquire) == op)
+        _slot->pending_write_.store(nullptr, std::memory_order_release);
     }
     qc->op_queue_.push(op);
     return;
@@ -703,17 +729,15 @@ inline void reactor_t::arm_epoll_op(detail::queue_control_t *qc, detail::op_t *o
   }
   _slot = &qc->sockets_[op->socket_id_ - 1];
 
-  detail::op_t **_pending_k = nullptr;
-  if (is_read_op(op->kind_))
-    _pending_k = &_slot->pending_read_;
-  else if (is_write_op(op->kind_))
-    _pending_k = &_slot->pending_write_;
-  if (_pending_k == nullptr) {
+  const bool _read_k = is_read_op(op->kind_);
+  if (!_read_k && !is_write_op(op->kind_)) {
     finish_op(qc, op, EINVAL, 0, -1);
     return;
   }
-  if (*_pending_k != nullptr) {
-    // Ya hay una operación en esa dirección: el socket no puede con dos.
+  std::atomic<detail::op_t *> *_pending_k =
+      _read_k ? &_slot->pending_read_ : &_slot->pending_write_;
+  if (_pending_k->load(std::memory_order_acquire) != nullptr) {
+    // Ya hay una operacion en esa direccion: el socket no puede con dos.
     finish_op(qc, op, EALREADY, 0, -1);
     return;
   }
@@ -732,7 +756,7 @@ inline void reactor_t::arm_epoll_op(detail::queue_control_t *qc, detail::op_t *o
     }
   }
 
-  *_pending_k = op;
+  _pending_k->store(op, std::memory_order_release);
   update_interest(qc, _slot);
 }
 
@@ -835,10 +859,12 @@ inline void reactor_t::handle_epoll_event(detail::queue_control_t *qc,
   auto *_slot = &qc->sockets_[_token_k - 1];
   detail::op_t *_op = nullptr;
   const std::uint32_t _events_k = event.events;
-  if ((_events_k & (EPOLLIN | EPOLLHUP | EPOLLERR)) != 0 && _slot->pending_read_ != nullptr)
-    _op = _slot->pending_read_;
-  else if ((_events_k & (EPOLLOUT | EPOLLHUP | EPOLLERR)) != 0 && _slot->pending_write_ != nullptr)
-    _op = _slot->pending_write_;
+  if ((_events_k & (EPOLLIN | EPOLLHUP | EPOLLERR)) != 0 &&
+      _slot->pending_read_.load(std::memory_order_acquire) != nullptr)
+    _op = _slot->pending_read_.load(std::memory_order_acquire);
+  else if ((_events_k & (EPOLLOUT | EPOLLHUP | EPOLLERR)) != 0 &&
+           _slot->pending_write_.load(std::memory_order_acquire) != nullptr)
+    _op = _slot->pending_write_.load(std::memory_order_acquire);
   if (_op == nullptr)
     return;
   reactor_t::run_epoll_op(qc, _op);
@@ -847,7 +873,34 @@ inline void reactor_t::handle_epoll_event(detail::queue_control_t *qc,
 // --- despacho por backend ---
 
 inline void reactor_t::execute_op(detail::queue_control_t *qc, detail::op_t *op) noexcept {
-  if (op->kind_ == op_kind_t::timer_ || op->kind_ == op_kind_t::custom_) {
+  if (op->kind_ == op_kind_t::timer_) {
+    // El timer entra en el heap de la queue, que solo manipula su hilo.
+    if (!qc->timers_.insert(op)) {
+      op->result_.ec_ = ENOSPC;
+      op->result_.bytes_ = 0;
+      if (op->fn_ != nullptr)
+        op->fn_(op->ctx_, op->result_);
+      op->done_.store(true, std::memory_order_release);
+      qc->timers_live_.fetch_sub(1, std::memory_order_acq_rel);
+    }
+    return;
+  }
+  if (op->kind_ == op_kind_t::cancel_) {
+    for (std::size_t _index = 0; _index < qc->timers_segment_size_; ++_index) {
+      detail::op_t *_timer = &qc->timers_segment_[_index];
+      if (_timer->done_.load(std::memory_order_acquire) || _timer->timer_id_ != op->cancel_target_)
+        continue;
+      if (qc->timers_.remove(_timer)) {
+        _timer->timer_id_ = 0;
+        _timer->done_.store(true, std::memory_order_release);
+        qc->timers_live_.fetch_sub(1, std::memory_order_acq_rel);
+      }
+      break;
+    }
+    op->done_.store(true, std::memory_order_release);
+    return;
+  }
+  if (op->kind_ == op_kind_t::custom_) {
     op->result_.ec_ = 0;
     op->result_.bytes_ = 0;
     if (op->fn_ != nullptr)
@@ -857,7 +910,7 @@ inline void reactor_t::execute_op(detail::queue_control_t *qc, detail::op_t *op)
       qc->strands_[_strand_index_k].release();
     }
     release_socket(qc, op->socket_id_);
-    op->done_ = true;
+    op->done_.store(true, std::memory_order_release);
     return;
   }
 
@@ -984,9 +1037,9 @@ inline bool queue_t::post(op_kind_t kind,
                           std::size_t addr_len) noexcept {
   if (control_ == nullptr || ops_segment_ == nullptr)
     return false;
-  for (std::size_t _index = 0; _index < ops_segment_size_; ++_index) {
-    if (ops_segment_[_index].done_) {
-      auto *_op = &ops_segment_[_index];
+  auto *_op = acquire_op(ops_segment_, ops_segment_size_);
+  if (_op != nullptr) {
+    {
       _op->kind_ = kind;
       _op->fd_ = fd;
       _op->buffer_ = buffer;
@@ -1003,7 +1056,6 @@ inline bool queue_t::post(op_kind_t kind,
         _op->peer_len_ = 0;
       }
       _op->result_ = op_result_t{};
-      _op->done_ = false;
       _op->next_ = nullptr;
       return control_->op_queue_.push(_op);
     }
@@ -1153,9 +1205,22 @@ inline bool socket_t::recv_from(
 }
 
 inline void socket_t::close() noexcept {
-  if (fd_ >= 0)
-    ::close(fd_);
+  if (fd_ < 0)
+    return;
+  detail::socket_slot_t *_slot = slot();
+  const bool _busy_k =
+      (_slot != nullptr) && (_slot->pending_read_ != nullptr || _slot->pending_write_ != nullptr);
+  if (_busy_k) {
+    // Hay una operacion en vuelo: el descriptor se cierra cuando termine, en
+    // el hilo de la queue. El socket queda invalido desde ahora.
+    _slot->close_pending_.store(true, std::memory_order_release);
+    fd_ = -1;
+    return;
+  }
+  ::close(fd_);
   fd_ = -1;
+  if (_slot != nullptr)
+    _slot->fd_ = -1;
 }
 
 } // namespace frameworkcpp::reactor

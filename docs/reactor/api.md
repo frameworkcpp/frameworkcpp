@@ -136,8 +136,17 @@ const std::uint64_t id = reactor.schedule_timer(queue, 100000000ULL, on_tick, &s
 bool cancel_timer(queue_t *queue, std::uint64_t timer_id) const noexcept;
 ```
 
-Cancels a timer before it fires. Returns true when the timer was still
-alive. Cancelling twice is harmless: the second call returns false.
+Cancels a timer before it fires. Returns true when the request was queued.
+
+The cancellation is **asynchronous**: the timer heap belongs to the queue's
+thread, so the request travels through the operation queue and the thread
+drops the timer when it gets to it. A timer that already fired is simply not
+in the heap anymore, and the request has no effect.
+
+```cpp
+const std::uint64_t id = reactor.schedule_timer(queue, 100000000ULL, on_tick, &state);
+reactor.cancel_timer(queue, id);   // the timer will not fire
+```
 
 ## get_timer_count
 

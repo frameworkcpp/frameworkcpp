@@ -77,6 +77,21 @@ The producer publishes by writing the pointer into the slot and then bumping
 and bumps `head_`. There is no lock, no condition variable and no allocation.
 The cost is a single atomic store per post.
 
+## Who touches what
+
+The reactor has three kinds of state and each one has a single owner:
+
+| State | Owner | How other threads reach it |
+| --- | --- | --- |
+| Operation pool | anyone | a compare-exchange takes a free operation, so two threads posting at once never take the same one |
+| Timer heap | the queue's thread | a timer is scheduled by queueing an operation; the thread puts it in the heap |
+| Socket slots | the queue's thread | the pending operation and the close flag are atomics |
+
+That is why the timer heap needs no lock and the operation pool needs no
+mutex: the heap is touched by one thread, and the pool hands out operations
+atomically. Scheduling and cancelling a timer are both requests that travel
+through the operation queue, so the caller never touches the heap.
+
 ## The strand protocol
 
 A strand is a serialisation key: operations sharing a `strand_id` must not run

@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <sys/socket.h>
@@ -25,13 +26,17 @@ struct op_t {
   reactor_fn_t fn_ = nullptr;
   void *ctx_ = nullptr;
   std::uint64_t strand_id_ = 0;
-  std::uint64_t socket_id_ = 0;   // socket dueño de la op (0 = ninguna)
-  std::uint64_t timer_id_ = 0;    // id del timer (0 = no es un timer)
-  std::uint64_t deadline_ns_ = 0; // deadline absoluto del timer
-  std::size_t heap_index_ = 0;    // posición en el heap de timers
+  std::uint64_t socket_id_ = 0;     // socket dueño de la op (0 = ninguna)
+  std::uint64_t timer_id_ = 0;      // id del timer (0 = no es un timer)
+  std::uint64_t cancel_target_ = 0; // timer a cancelar en una op de cancelacion
+  std::uint64_t deadline_ns_ = 0;   // deadline absoluto del timer
+  std::size_t heap_index_ = 0;      // posición en el heap de timers
   int priority_ = 0;
   op_result_t result_{};
-  bool done_ = false;
+  // La operacion esta libre cuando vale true. Lo toman los hilos que postean
+  // y lo suelta el hilo de la queue, asi que tiene que ser atomico: dos
+  // hilos que posteen a la vez no pueden tomar la misma operacion.
+  std::atomic<bool> done_{true};
   op_t *next_ = nullptr; // para cadenas intrusivas de strand
 
   // Almacenamiento de direcciones de la operación.

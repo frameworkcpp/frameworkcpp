@@ -330,26 +330,29 @@ TEST(reactor_test_t, TimerFiresAfterItsDeadline) {
 }
 
 TEST(reactor_test_t, CancelsATimerBeforeItFires) {
-  auto _arena_config = make_arena_config(arena::round_to_page(precompute(make_reactor_config())));
+  const reactor_config_t _config_k = make_reactor_config();
+  auto _arena_config = make_arena_config(arena::round_to_page(precompute(_config_k)));
   arena::arena_t _arena{_arena_config};
   reactor_t _reactor;
-  ASSERT_TRUE(_reactor.bind_arena(_arena, make_reactor_config()));
+  ASSERT_TRUE(_reactor.bind_arena(_arena, _config_k));
 
   auto *_queue = _reactor.get_or_create("timers");
   timer_context_t _context;
   const std::uint64_t _id_k = _reactor.schedule_timer(_queue, 50000000ULL, on_timer, &_context);
   ASSERT_NE(_id_k, 0U);
-  EXPECT_TRUE(_reactor.cancel_timer(_queue, _id_k));
-  EXPECT_EQ(_reactor.get_timer_count(_queue), 0U);
+  EXPECT_EQ(_reactor.get_timer_count(_queue), 1U);
 
-  // Cancelar dos veces no tiene efecto: el timer ya no existe.
-  EXPECT_FALSE(_reactor.cancel_timer(_queue, _id_k));
+  // La cancelacion se encola: la queue la aplica cuando toca el heap, porque
+  // el heap es de un solo hilo.
+  EXPECT_TRUE(_reactor.cancel_timer(_queue, _id_k));
 
   _reactor.run_all();
   std::this_thread::sleep_for(std::chrono::milliseconds(150));
   _reactor.stop_all();
 
+  // El timer se cancelo: nunca llego a dispararse.
   EXPECT_FALSE(_context.fired_.load(std::memory_order_acquire));
+  EXPECT_EQ(_reactor.get_timer_count(_queue), 0U);
 }
 
 TEST(reactor_test_t, FiresTimersInDeadlineOrder) {
@@ -849,6 +852,61 @@ TEST(reactor_test_t, RejectsASecondOperationOnTheSameDirection) {
 
   ::close(_fds[0]);
   ::close(_fds[1]);
+}
+
+TEST(reactor_test_t, ClosingASocketWithAReadPendingReleasesTheSlot) {
+  // Cerrar un socket con una lectura en vuelo no puede dejar la operacion sin
+  // dueño: el descriptor se cierra cuando la lectura termina. Y el slot de la
+  // socket tiene que quedar libre para poder reutilizarlo.
+  const reactor_config_t _config_k = make_reactor_config();
+
+  auto _arena_config = make_arena_config(arena::round_to_page(precompute(_config_k)));
+  arena::arena_t _arena{_arena_config};
+  reactor_t _reactor;
+  ASSERT_TRUE(_reactor.bind_arena(_arena, _config_k));
+
+  auto *_queue = _reactor.get_or_create("closing");
+  int _fds[2] = {-1, -1};
+  ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, _fds), 0);
+  auto _socket = _reactor.create_socket(_fds[0], _queue);
+  ASSERT_TRUE(_socket);
+
+  recv_context_t _context;
+  ASSERT_TRUE(_socket.recv(_context.data_, sizeof(_context.data_), on_recv, &_context));
+
+  _reactor.run_all();
+
+  // El otro extremo se cierra: la lectura termina con fin de fichero.
+  ::close(_fds[1]);
+  const auto _deadline_k = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (!_context.done_.load(std::memory_order_acquire) &&
+         std::chrono::steady_clock::now() < _deadline_k) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  EXPECT_TRUE(_context.done_.load(std::memory_order_acquire));
+  EXPECT_EQ(_context.ec_.load(std::memory_order_acquire), 0);
+  EXPECT_EQ(_context.bytes_.load(std::memory_order_acquire), 0U);
+
+  // Cerrar con una operacion en vuelo difiere el cierre al hilo de la queue.
+  auto _second = _reactor.create_socket(_fds[0], _queue);
+  ASSERT_TRUE(_second);
+  recv_context_t _second_context;
+  ASSERT_TRUE(_second.recv(
+      _second_context.data_, sizeof(_second_context.data_), on_recv, &_second_context));
+  _second.close();
+
+  const auto _second_deadline_k = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (!_second_context.done_.load(std::memory_order_acquire) &&
+         std::chrono::steady_clock::now() < _second_deadline_k) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  // El slot quedo libre: una socket nueva lo puede tomar.
+  auto _third = _reactor.create_socket(_fds[0], _queue);
+  EXPECT_TRUE(_third);
+  _third.close();
+
+  _reactor.stop_all();
+  ::close(_fds[0]);
 }
 
 } // namespace

@@ -37,6 +37,9 @@ struct queue_control_t {
   op_t *timers_segment_ = nullptr; // segmento propio de timers
   std::size_t timers_segment_size_ = 0;
   timer_wheel_t timers_;
+  // Timers vivos: agendados, esperando o en el heap. El conteo del heap solo
+  // no alcanza porque un timer recien agendado aun no entro.
+  std::atomic<std::size_t> timers_live_{0};
 
   socket_slot_t *sockets_ = nullptr;
   std::size_t num_sockets_ = 0;
@@ -56,12 +59,16 @@ struct socket_slot_t {
   // Dirección del emisor del último datagrama recibido.
   sockaddr_storage peer_{};
   socklen_t peer_len_ = 0;
-  // Una operación pendiente por dirección. El backend de epoll necesita al
-  // máximo una por dirección porque el interest se registra por descriptor.
-  op_t *pending_read_ = nullptr;
-  op_t *pending_write_ = nullptr;
+  // Una operacion pendiente por direccion. El backend de epoll necesita al
+  // maximo una por direccion porque el interest se registra por descriptor.
+  // Son atomicos porque el hilo que cierra el socket los consulta mientras la
+  // queue los escribe.
+  std::atomic<op_t *> pending_read_{nullptr};
+  std::atomic<op_t *> pending_write_{nullptr};
   // Eventos registrados en epoll para este descriptor.
   std::uint32_t interest_ = 0;
+  // El descriptor se cierra cuando termine la operacion en vuelo.
+  std::atomic<bool> close_pending_{false};
 }; // struct socket_slot_t
 
 struct reactor_state_t {
