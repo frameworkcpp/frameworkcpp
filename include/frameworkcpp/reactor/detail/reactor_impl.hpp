@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <new>
 #include <sys/un.h>
@@ -236,6 +237,12 @@ inline socket_t reactor_t::create_socket(int fd, queue_t *queue) const noexcept 
   socket_t _socket{};
   if (!bound_ || queue == nullptr || fd < 0)
     return _socket;
+  // El reactor trabaja en modo no bloqueante: asi una operacion nunca
+  // bloquea el hilo de la queue. El socket queda en ese modo para quien lo
+  // use despues.
+  const int _flags_k = ::fcntl(fd, F_GETFL, 0);
+  if (_flags_k >= 0)
+    (void) ::fcntl(fd, F_SETFL, _flags_k | O_NONBLOCK);
   for (std::size_t _index = 0; _index < state_.num_sockets_; ++_index) {
     if (state_.sockets_[_index].fd_ < 0) {
       state_.sockets_[_index].fd_ = fd;
@@ -533,7 +540,8 @@ inline void update_interest(detail::queue_control_t *qc, detail::socket_slot_t *
     if (slot->interest_ != 0)
       (void) qc->epoll_.remove(slot->fd_);
   } else if (slot->interest_ == 0) {
-    (void) qc->epoll_.add(slot->fd_, _events, slot->socket_id_);
+    if (!qc->epoll_.add(slot->fd_, _events, slot->socket_id_))
+      (void) qc->epoll_.modify(slot->fd_, _events, slot->socket_id_);
   } else {
     (void) qc->epoll_.modify(slot->fd_, _events, slot->socket_id_);
   }
@@ -606,10 +614,36 @@ inline void reactor_t::complete_op(detail::queue_control_t *qc, struct io_uring_
 }
 
 inline void reactor_t::execute_io_uring_op(detail::queue_control_t *qc, detail::op_t *op) noexcept {
+  // Una operacion por direccion y socket, igual que en el backend de epoll:
+  // el contrato es el mismo en los dos.
+  detail::socket_slot_t *_slot = nullptr;
+  if (op->socket_id_ != 0 && op->socket_id_ <= qc->num_sockets_) {
+    _slot = &qc->sockets_[op->socket_id_ - 1];
+    detail::op_t **_pending_k = nullptr;
+    if (is_read_op(op->kind_))
+      _pending_k = &_slot->pending_read_;
+    else if (is_write_op(op->kind_))
+      _pending_k = &_slot->pending_write_;
+    if (_pending_k != nullptr) {
+      if (*_pending_k != nullptr) {
+        finish_op(qc, op, EALREADY, 0, -1);
+        return;
+      }
+      *_pending_k = op;
+    }
+  }
+
   const auto _index_k = static_cast<std::uint64_t>(op - qc->ops_segment_);
   auto *_sqe = qc->ring_.acquire_sqe();
   if (_sqe == nullptr) {
-    // Sin SQE no se puede publicar la operación: vuelve a la cola.
+    // Sin SQE no se puede publicar la operación: vuelve a la cola y su
+    // reserva de direccion se suelta.
+    if (_slot != nullptr) {
+      if (_slot->pending_read_ == op)
+        _slot->pending_read_ = nullptr;
+      if (_slot->pending_write_ == op)
+        _slot->pending_write_ = nullptr;
+    }
     qc->op_queue_.push(op);
     return;
   }
@@ -683,6 +717,21 @@ inline void reactor_t::arm_epoll_op(detail::queue_control_t *qc, detail::op_t *o
     finish_op(qc, op, EALREADY, 0, -1);
     return;
   }
+  if (op->kind_ == op_kind_t::connect_) {
+    // El connect se emite aqui: el kernel responde EINPROGRESS y la
+    // conexion se sabe buena cuando el descriptor quede escribible.
+    if (::connect(op->fd_, reinterpret_cast<const sockaddr *>(&op->peer_), op->peer_len_) == 0) {
+      // Conexion inmediata (loopback): no hace falta esperar.
+      finish_op(qc, op, 0, 0, -1);
+      return;
+    }
+    if (errno != EINPROGRESS && errno != EALREADY && errno != EINTR) {
+      const int _err_k = errno;
+      finish_op(qc, op, _err_k, 0, -1);
+      return;
+    }
+  }
+
   *_pending_k = op;
   update_interest(qc, _slot);
 }
@@ -763,6 +812,8 @@ inline void reactor_t::run_epoll_op(detail::queue_control_t *qc, detail::op_t *o
     return;
   }
   case op_kind_t::connect_: {
+    // El socket ya esta en modo no bloqueante: connect devuelve EINPROGRESS
+    // y la conexion se completa cuando el descriptor quede escribible.
     int _err_k = 0;
     socklen_t _err_len_k = sizeof(_err_k);
     if (::getsockopt(op->fd_, SOL_SOCKET, SO_ERROR, &_err_k, &_err_len_k) < 0)

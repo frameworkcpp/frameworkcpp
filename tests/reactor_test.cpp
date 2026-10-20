@@ -9,6 +9,7 @@
 
 #include <arpa/inet.h>
 #include <cerrno>
+#include <fcntl.h>
 #include <gtest/gtest.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -651,9 +652,12 @@ TEST(reactor_test_t, ConnectsToATcpServer) {
   }
   _reactor.stop_all();
 
-  // Lo que importa es que la operación se completa y reporta su error.
+  // La operacion se completa y reporta el error de verdad: un puerto cerrado
+  // no se puede conectar. Si el connect no se emitiera, el handler recibiria
+  // un exito falso.
   EXPECT_TRUE(_context.done_.load(std::memory_order_acquire));
   EXPECT_NE(_context.ec_.load(std::memory_order_acquire), -999);
+  EXPECT_NE(_context.ec_.load(std::memory_order_acquire), 0);
   _socket.close();
 }
 
@@ -804,6 +808,47 @@ TEST(reactor_test_t, AutoBackendPicksIoUringWhenAvailable) {
 
   const backend_t _expected_k = io_uring_available() ? backend_t::io_uring_ : backend_t::epoll_;
   EXPECT_EQ(_reactor.get_backend(), _expected_k);
+}
+
+TEST(reactor_test_t, RejectsASecondOperationOnTheSameDirection) {
+  // Un socket admite una lectura y una escritura a la vez. Una segunda
+  // lectura se rechaza en vez de acumularse: el contrato es el mismo en los
+  // dos backends.
+  const reactor_config_t _config_k = make_reactor_config();
+
+  auto _arena_config = make_arena_config(arena::round_to_page(precompute(_config_k)));
+  arena::arena_t _arena{_arena_config};
+  reactor_t _reactor;
+  ASSERT_TRUE(_reactor.bind_arena(_arena, _config_k));
+
+  auto *_queue = _reactor.get_or_create("busy");
+  int _fds[2] = {-1, -1};
+  ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, _fds), 0);
+  auto _socket = _reactor.create_socket(_fds[0], _queue);
+  ASSERT_TRUE(_socket);
+
+  recv_context_t _first;
+  recv_context_t _second;
+  ASSERT_TRUE(_socket.recv(_first.data_, sizeof(_first.data_), on_recv, &_first));
+
+  _reactor.run_all();
+
+  // La segunda lectura se completa con EALREADY en vez de quedar esperando.
+  const bool _posted_k = _socket.recv(_second.data_, sizeof(_second.data_), on_recv, &_second);
+  const auto _deadline_k = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (!_second.done_.load(std::memory_order_acquire) &&
+         std::chrono::steady_clock::now() < _deadline_k) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  _reactor.stop_all();
+
+  if (_posted_k) {
+    EXPECT_EQ(_second.ec_.load(std::memory_order_acquire), EALREADY);
+  }
+  EXPECT_FALSE(_first.done_.load(std::memory_order_acquire));
+
+  ::close(_fds[0]);
+  ::close(_fds[1]);
 }
 
 } // namespace
