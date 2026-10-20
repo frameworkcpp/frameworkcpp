@@ -27,6 +27,7 @@ constexpr std::size_t precompute(const reactor_config_t &config) noexcept;
 // Cola nombrada de eventos. Cada queue tiene su io_uring y su hilo de eventos.
 class queue_t {
   friend class reactor_t;
+  friend class socket_t;
   friend struct detail::queue_control_t;
 
   std::string_view name_;
@@ -42,6 +43,10 @@ class queue_t {
 
   [[nodiscard]] std::string_view name() const noexcept { return name_; }
 
+  // Identificador numérico de la queue. Estable durante toda la vida del
+  // reactor; 0 si el handle no está ligado a ninguna queue.
+  [[nodiscard]] std::uint64_t id() const noexcept { return id_; }
+
   // Postea una operación sin lambda. `fn` se invoca al completarse con `ctx`.
   bool post(op_kind_t kind,
             int fd,
@@ -50,7 +55,8 @@ class queue_t {
             reactor_fn_t fn,
             void *ctx,
             std::uint64_t strand_id = 0,
-            int priority = 0) noexcept;
+            int priority = 0,
+            std::uint64_t socket_id = 0) noexcept;
 
   // Loop de eventos del hilo dueño de esta queue. Bloqueante.
   void run() noexcept;
@@ -77,6 +83,10 @@ class socket_t {
 
   [[nodiscard]] queue_t *queue() const noexcept { return queue_; }
 
+  // True cuando no hay ninguna operación en vuelo para este socket. Solo un
+  // socket ocioso puede mudarse de queue.
+  [[nodiscard]] bool is_idle() const noexcept;
+
   bool recv(void *buffer,
             std::size_t len,
             reactor_fn_t fn,
@@ -98,6 +108,15 @@ class socket_t {
                std::uint64_t strand_id = 0) noexcept;
 
   void close() noexcept;
+
+  private:
+  [[nodiscard]] detail::socket_slot_t *slot() const noexcept;
+  bool post_op(op_kind_t kind,
+               void *buffer,
+               std::size_t len,
+               reactor_fn_t fn,
+               void *ctx,
+               std::uint64_t strand_id) noexcept;
 }; // class socket_t
 
 // Serializa handlers por clave (fd / connection_id) sin mutex en fast path.
@@ -136,6 +155,21 @@ class reactor_t {
   // slots libres o la queue es nula.
   socket_t create_socket(int fd, queue_t *queue) const noexcept;
 
+  // Mueve un socket a otra queue sin cerrarlo: la conexión sigue viva y sus
+  // próximas operaciones las atiende el hilo de la queue destino. Es lo que
+  // permite balancear conexiones entre hilos en caliente.
+  //
+  // Devuelve false si el socket tiene operaciones en vuelo o si la queue
+  // destino no existe.
+  bool migrate(socket_t &socket, queue_t *target) noexcept;
+
+  // Reparte los sockets ociosos entre las queues, de la más cargada a la más
+  // descargada. Devuelve cuántos sockets se movieron.
+  [[nodiscard]] std::size_t rebalance() const noexcept;
+
+  // Conexiones registradas por queue. Sirve para observar el reparto.
+  [[nodiscard]] std::size_t get_socket_count(queue_t *queue) const noexcept;
+
   // Ejecuta los loops de todas las queues (bloqueante).
   void run_all() noexcept;
 
@@ -149,10 +183,12 @@ class reactor_t {
   private:
   static void execute_op(detail::queue_control_t *qc, detail::op_t *op) noexcept;
   static void complete_op(detail::queue_control_t *qc, struct io_uring_cqe *cqe) noexcept;
+  static void release_socket(detail::queue_control_t *qc, std::uint64_t socket_id) noexcept;
   void run_queue(std::size_t index) const noexcept;
 
   detail::reactor_state_t state_{};
   bool bound_ = false;
+  bool affinity_ = false;
 }; // class reactor_t
 
 } // namespace frameworkcpp::reactor
@@ -168,6 +204,7 @@ namespace frameworkcpp::reactor {
 constexpr void make_specs(const reactor_config_t &config,
                           arena::object_spec_t (&specs)[reactor_spec_count_k]) {
   const std::size_t _total_ops_k = config.queues_ * config.max_jobs_per_queue_;
+  const std::size_t _total_strands_k = config.queues_ * config.max_strands_;
   specs[0] = {reactor_shard_tag_k,
               sizeof(detail::queue_control_t) * config.queues_,
               alignof(detail::queue_control_t),
@@ -182,7 +219,7 @@ constexpr void make_specs(const reactor_config_t &config,
               alignof(detail::socket_slot_t),
               1};
   specs[5] = {reactor_shard_tag_k + 5,
-              sizeof(detail::strand_t) * config.max_strands_,
+              sizeof(detail::strand_t) * _total_strands_k,
               alignof(detail::strand_t),
               1};
 }

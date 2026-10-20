@@ -13,10 +13,23 @@
 #include <vector>
 
 #include "frameworkcpp/arena/arena.hpp"
+#include "frameworkcpp/reactor/detail/affinity.hpp"
 #include "frameworkcpp/reactor/detail/io_uring_ring.hpp"
 #include "frameworkcpp/reactor/detail/op.hpp"
 #include "frameworkcpp/reactor/detail/op_queue.hpp"
 #include "frameworkcpp/reactor/detail/strand.hpp"
+
+namespace frameworkcpp::reactor::detail {
+
+// Localiza el slot de un socket por su id. Devuelve nullptr si el id no
+// corresponde a ningún socket registrado.
+inline socket_slot_t *find_slot(reactor_state_t *state, std::uint64_t socket_id) noexcept {
+  if (socket_id == 0 || socket_id > state->num_sockets_)
+    return nullptr;
+  return &state->sockets_[socket_id - 1];
+}
+
+} // namespace frameworkcpp::reactor::detail
 
 namespace frameworkcpp::reactor {
 
@@ -37,6 +50,7 @@ inline bool reactor_t::bind_arena(arena::arena_t &arena, const reactor_config_t 
   make_specs(config, _specs);
 
   const std::size_t _total_ops_k = config.queues_ * config.max_jobs_per_queue_;
+  const std::size_t _total_strands_k = config.queues_ * config.max_strands_;
 
   arena::arena_shard_t _shard{};
   try {
@@ -61,7 +75,7 @@ inline bool reactor_t::bind_arena(arena::arena_t &arena, const reactor_config_t 
                                               sizeof(detail::socket_slot_t) * config.max_sockets_,
                                               alignof(detail::socket_slot_t));
   auto *_strands_raw = _shard.allocate_tagged(reactor_shard_tag_k + 5,
-                                              sizeof(detail::strand_t) * config.max_strands_,
+                                              sizeof(detail::strand_t) * _total_strands_k,
                                               alignof(detail::strand_t));
 
   if (_queues_raw == nullptr || _handles_raw == nullptr || _ops_raw == nullptr ||
@@ -76,8 +90,9 @@ inline bool reactor_t::bind_arena(arena::arena_t &arena, const reactor_config_t 
   state_.strands_ = reinterpret_cast<detail::strand_t *>(_strands_raw);
   state_.num_queues_ = config.queues_;
   state_.num_sockets_ = config.max_sockets_;
+  state_.num_strands_ = config.max_strands_;
 
-  for (std::size_t _index = 0; _index < config.max_strands_; ++_index)
+  for (std::size_t _index = 0; _index < _total_strands_k; ++_index)
     new (static_cast<void *>(&state_.strands_[_index])) detail::strand_t();
 
   for (std::size_t _index = 0; _index < config.max_sockets_; ++_index) {
@@ -96,8 +111,10 @@ inline bool reactor_t::bind_arena(arena::arena_t &arena, const reactor_config_t 
                                           config.max_jobs_per_queue_);
     if (!state_.queues_[_index].ring_.init(static_cast<std::uint32_t>(config.max_jobs_per_queue_)))
       return false;
-    state_.queues_[_index].strands_ = state_.strands_;
+    state_.queues_[_index].strands_ = &state_.strands_[_index * config.max_strands_];
     state_.queues_[_index].num_strands_ = config.max_strands_;
+    state_.queues_[_index].sockets_ = state_.sockets_;
+    state_.queues_[_index].num_sockets_ = config.max_sockets_;
     state_.queues_[_index].ops_segment_ = &state_.ops_[_index * config.max_jobs_per_queue_];
     state_.queues_[_index].ops_segment_size_ = config.max_jobs_per_queue_;
 
@@ -109,6 +126,7 @@ inline bool reactor_t::bind_arena(arena::arena_t &arena, const reactor_config_t 
     state_.queue_handles_[_index].ops_segment_size_ = config.max_jobs_per_queue_;
   }
 
+  affinity_ = config.affinity_;
   bound_ = true;
   return true;
 }
@@ -151,6 +169,90 @@ inline socket_t reactor_t::create_socket(int fd, queue_t *queue) const noexcept 
   return _socket;
 }
 
+inline void reactor_t::release_socket(detail::queue_control_t *qc,
+                                      std::uint64_t socket_id) noexcept {
+  if (socket_id == 0 || socket_id > qc->num_sockets_)
+    return;
+  qc->sockets_[socket_id - 1].inflight_.fetch_sub(1, std::memory_order_release);
+}
+
+inline bool reactor_t::migrate(socket_t &socket, queue_t *target) noexcept {
+  if (!bound_ || target == nullptr || socket.id_ == 0)
+    return false;
+  detail::socket_slot_t *_slot = detail::find_slot(&state_, socket.id_);
+  if (_slot == nullptr || _slot->fd_ < 0)
+    return false;
+  // Con operaciones en vuelo el socket pertenece a la queue que las atiende:
+  // mudarlo ahora dejaría una conexión con dos dueños.
+  if (_slot->inflight_.load(std::memory_order_acquire) != 0)
+    return false;
+  if (_slot->queue_ == target)
+    return true;
+  _slot->queue_ = target;
+  socket.queue_ = target;
+  return true;
+}
+
+inline std::size_t reactor_t::get_socket_count(queue_t *queue) const noexcept {
+  if (!bound_ || queue == nullptr)
+    return 0;
+  std::size_t _count = 0;
+  for (std::size_t _index = 0; _index < state_.num_sockets_; ++_index) {
+    if (state_.sockets_[_index].fd_ >= 0 && state_.sockets_[_index].queue_ == queue)
+      ++_count;
+  }
+  return _count;
+}
+
+inline std::size_t reactor_t::rebalance() const noexcept {
+  if (!bound_ || state_.num_queues_ < 2)
+    return 0;
+
+  std::size_t _counts[max_reactor_queues_k] = {};
+  if (state_.num_queues_ > max_reactor_queues_k)
+    return 0;
+
+  for (std::size_t _index = 0; _index < state_.num_sockets_; ++_index) {
+    const detail::socket_slot_t &_slot = state_.sockets_[_index];
+    if (_slot.fd_ < 0 || _slot.queue_ == nullptr)
+      continue;
+    const std::uint64_t _queue_id_k = _slot.queue_->id();
+    if (_queue_id_k == 0 || _queue_id_k > max_reactor_queues_k)
+      continue;
+    ++_counts[_queue_id_k - 1];
+  }
+
+  std::size_t _busiest = 0;
+  std::size_t _quietest = 0;
+  for (std::size_t _index = 1; _index < state_.num_queues_; ++_index) {
+    if (_counts[_index] > _counts[_busiest])
+      _busiest = _index;
+    if (_counts[_index] < _counts[_quietest])
+      _quietest = _index;
+  }
+  if (_counts[_busiest] - _counts[_quietest] <= 1)
+    return 0;
+
+  queue_t *_target = &state_.queue_handles_[_quietest];
+  std::size_t _moved = 0;
+  for (std::size_t _index = 0;
+       _index < state_.num_sockets_ && _counts[_busiest] > _counts[_quietest] + 1;
+       ++_index) {
+    detail::socket_slot_t &_slot = state_.sockets_[_index];
+    if (_slot.fd_ < 0 || _slot.queue_ == nullptr)
+      continue;
+    if (_slot.queue_->id() != _busiest + 1)
+      continue;
+    if (_slot.inflight_.load(std::memory_order_acquire) != 0)
+      continue; // busy: se moverá en un rebalanceo posterior
+    _slot.queue_ = _target;
+    --_counts[_busiest];
+    ++_counts[_quietest];
+    ++_moved;
+  }
+  return _moved;
+}
+
 inline void reactor_t::run_all() noexcept {
   if (!bound_)
     return;
@@ -163,6 +265,8 @@ inline void reactor_t::run_all() noexcept {
 
 inline void reactor_t::run_queue(std::size_t index) const noexcept {
   auto *_qc = &this->state_.queues_[index];
+  if (affinity_)
+    (void) detail::pin_thread_to_cpu(index);
   while (!_qc->stop_.load(std::memory_order_acquire)) {
     // 1. Desencadenar strands listos: un op por strand, en orden.
     for (std::size_t _strand = 0; _strand < _qc->num_strands_; ++_strand) {
@@ -208,6 +312,7 @@ inline void reactor_t::complete_op(detail::queue_control_t *qc, struct io_uring_
     const auto _strand_index_k = static_cast<std::size_t>(_op->strand_id_ % qc->num_strands_);
     qc->strands_[_strand_index_k].release();
   }
+  release_socket(qc, _op->socket_id_);
   _op->done_ = true;
 }
 
@@ -271,6 +376,7 @@ inline void reactor_t::execute_op(detail::queue_control_t *qc, detail::op_t *op)
       const auto _strand_index_k = static_cast<std::size_t>(op->strand_id_ % qc->num_strands_);
       qc->strands_[_strand_index_k].release();
     }
+    release_socket(qc, op->socket_id_);
     op->done_ = true;
     break;
   }
@@ -298,7 +404,8 @@ inline bool queue_t::post(op_kind_t kind,
                           reactor_fn_t fn,
                           void *ctx,
                           std::uint64_t strand_id,
-                          int priority) noexcept {
+                          int priority,
+                          std::uint64_t socket_id) noexcept {
   if (control_ == nullptr || ops_segment_ == nullptr)
     return false;
   for (std::size_t _index = 0; _index < ops_segment_size_; ++_index) {
@@ -311,6 +418,7 @@ inline bool queue_t::post(op_kind_t kind,
       _op->fn_ = fn;
       _op->ctx_ = ctx;
       _op->strand_id_ = strand_id;
+      _op->socket_id_ = socket_id;
       _op->priority_ = priority;
       _op->result_ = op_result_t{};
       _op->done_ = false;
@@ -333,11 +441,44 @@ inline std::size_t queue_t::pending_ops() const noexcept {
 
 // --- socket_t ---
 
-inline bool socket_t::recv(
-    void *buffer, std::size_t len, reactor_fn_t fn, void *ctx, std::uint64_t strand_id) noexcept {
+inline detail::socket_slot_t *socket_t::slot() const noexcept {
+  if (queue_ == nullptr || queue_->control_ == nullptr)
+    return nullptr;
+  detail::queue_control_t *_qc = queue_->control_;
+  if (id_ == 0 || id_ > _qc->num_sockets_)
+    return nullptr;
+  return &_qc->sockets_[id_ - 1];
+}
+
+inline bool socket_t::is_idle() const noexcept {
+  const detail::socket_slot_t *_slot = slot();
+  if (_slot == nullptr)
+    return false;
+  return _slot->inflight_.load(std::memory_order_acquire) == 0;
+}
+
+inline bool socket_t::post_op(op_kind_t kind,
+                              void *buffer,
+                              std::size_t len,
+                              reactor_fn_t fn,
+                              void *ctx,
+                              std::uint64_t strand_id) noexcept {
   if (queue_ == nullptr)
     return false;
-  return queue_->post(op_kind_t::recv_, fd_, buffer, len, fn, ctx, strand_id, 0);
+  detail::socket_slot_t *_slot = slot();
+  if (_slot == nullptr)
+    return false;
+  _slot->inflight_.fetch_add(1, std::memory_order_acq_rel);
+  if (!queue_->post(kind, fd_, buffer, len, fn, ctx, strand_id, 0, id_)) {
+    _slot->inflight_.fetch_sub(1, std::memory_order_release);
+    return false;
+  }
+  return true;
+}
+
+inline bool socket_t::recv(
+    void *buffer, std::size_t len, reactor_fn_t fn, void *ctx, std::uint64_t strand_id) noexcept {
+  return post_op(op_kind_t::recv_, buffer, len, fn, ctx, strand_id);
 }
 
 inline bool socket_t::send(const void *buffer,
@@ -345,16 +486,11 @@ inline bool socket_t::send(const void *buffer,
                            reactor_fn_t fn,
                            void *ctx,
                            std::uint64_t strand_id) noexcept {
-  if (queue_ == nullptr)
-    return false;
-  return queue_->post(
-      op_kind_t::send_, fd_, const_cast<void *>(buffer), len, fn, ctx, strand_id, 0);
+  return post_op(op_kind_t::send_, const_cast<void *>(buffer), len, fn, ctx, strand_id);
 }
 
 inline bool socket_t::accept(reactor_fn_t fn, void *ctx, std::uint64_t strand_id) noexcept {
-  if (queue_ == nullptr)
-    return false;
-  return queue_->post(op_kind_t::accept_, fd_, nullptr, 0, fn, ctx, strand_id, 0);
+  return post_op(op_kind_t::accept_, nullptr, 0, fn, ctx, strand_id);
 }
 
 inline bool socket_t::connect(const sockaddr *addr,
@@ -364,9 +500,7 @@ inline bool socket_t::connect(const sockaddr *addr,
                               std::uint64_t strand_id) noexcept {
   (void) addr;
   (void) addr_len;
-  if (queue_ == nullptr)
-    return false;
-  return queue_->post(op_kind_t::connect_, fd_, nullptr, 0, fn, ctx, strand_id, 0);
+  return post_op(op_kind_t::connect_, nullptr, 0, fn, ctx, strand_id);
 }
 
 inline void socket_t::close() noexcept {

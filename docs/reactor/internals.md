@@ -133,14 +133,49 @@ flowchart TD
 how many bytes it would take, so the number you budget at compile time is the
 number the reactor carves at runtime. The reactor test asserts exactly that.
 
+## Moving a connection between threads
+
+A socket is not owned by a thread: it is registered in a queue, and the queue's
+thread completes its operations. Moving a connection to another thread means
+pointing the socket at another queue — the file descriptor stays open, and the
+connection is never interrupted.
+
+The one rule is that the socket must be **idle**. A pending read belongs to the
+queue that will complete it, so a socket with operations in flight has an owner
+and cannot move. Each socket slot carries a counter of its in-flight
+operations:
+
+```cpp
+struct socket_slot_t {
+  int fd_ = -1;
+  queue_t *queue_ = nullptr;
+  std::uint64_t socket_id_ = 0;
+  std::atomic<std::uint32_t> inflight_{0};
+};
+```
+
+The counter is incremented when the operation is posted and decremented when
+its completion arrives. `migrate` refuses to move a socket whose counter is not
+zero, and `rebalance` skips those sockets and leaves them for a later round.
+
+Because `io_uring` resolves the descriptor when the operation is submitted,
+there is nothing to deregister: the next operation posted to the target queue
+simply runs on the target's ring.
+
+## Strands are per queue
+
+Each queue owns a segment of the strand table, and only its own thread touches
+it. A strand therefore cannot be contended by two threads, and the `busy` flag
+that serialises a strand never needs to be a cross-thread atomic.
+
+When a socket migrates, its strand moves with it: the strand id is interpreted
+in the target queue's segment from that moment on.
+
 ## What is not implemented yet
 
-- **Affinity.** `affinity_` is accepted and ignored; the threads are not
-  pinned.
-- **Hot migration.** Moving a socket from one queue to another — the piece that
-  would balance connections across threads — is not implemented. The socket
-  table and the queue's ring are already structured for it.
 - **Timers.** `op_kind_t::timer_` completes immediately; there is no deadline
   timer yet.
 - **UDP, ICMP and Unix sockets.** The `io_uring` operations exist in the
   vocabulary, but only TCP-style `accept`/`recv`/`send`/`connect` are wired up.
+- **Automatic rebalancing.** `rebalance()` is a call you make; the reactor does
+  not run it on a schedule on its own.

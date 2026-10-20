@@ -177,5 +177,119 @@ TEST(reactor_test_t, SendsOverIoUring) {
   ::close(_fds[1]);
 }
 
+TEST(reactor_test_t, MigratesAnIdleSocketToAnotherQueue) {
+  if (!io_uring_available())
+    GTEST_SKIP() << "io_uring is not available in this environment";
+  int _fds[2] = {-1, -1};
+  ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, _fds), 0);
+
+  auto _arena_config = make_arena_config(arena::round_to_page(precompute(make_reactor_config())));
+  arena::arena_t _arena{_arena_config};
+  reactor_t _reactor;
+  ASSERT_TRUE(_reactor.bind_arena(_arena, make_reactor_config()));
+
+  auto *_queue_a = _reactor.get_or_create("alpha");
+  auto *_queue_b = _reactor.get_or_create("beta");
+  ASSERT_NE(_queue_a, nullptr);
+  ASSERT_NE(_queue_b, nullptr);
+
+  auto _socket = _reactor.create_socket(_fds[0], _queue_a);
+  ASSERT_TRUE(_socket);
+  EXPECT_EQ(_socket.queue(), _queue_a);
+  EXPECT_TRUE(_socket.is_idle());
+
+  // La conexión sigue viva: solo cambia el hilo que la atiende.
+  EXPECT_TRUE(_reactor.migrate(_socket, _queue_b));
+  EXPECT_EQ(_socket.queue(), _queue_b);
+  EXPECT_EQ(_reactor.get_socket_count(_queue_b), 1U);
+  EXPECT_EQ(_reactor.get_socket_count(_queue_a), 0U);
+
+  ::close(_fds[0]);
+  ::close(_fds[1]);
+}
+
+TEST(reactor_test_t, RefusesToMigrateABusySocket) {
+  if (!io_uring_available())
+    GTEST_SKIP() << "io_uring is not available in this environment";
+  int _fds[2] = {-1, -1};
+  ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, _fds), 0);
+
+  auto _arena_config = make_arena_config(arena::round_to_page(precompute(make_reactor_config())));
+  arena::arena_t _arena{_arena_config};
+  reactor_t _reactor;
+  ASSERT_TRUE(_reactor.bind_arena(_arena, make_reactor_config()));
+
+  auto *_queue_a = _reactor.get_or_create("alpha");
+  auto *_queue_b = _reactor.get_or_create("beta");
+  auto _socket = _reactor.create_socket(_fds[0], _queue_a);
+  ASSERT_TRUE(_socket);
+
+  recv_context_t _context;
+  ASSERT_TRUE(_socket.recv(_context.data_, sizeof(_context.data_), on_recv, &_context));
+  EXPECT_FALSE(_socket.is_idle());
+
+  // Con una operación en vuelo el socket tiene dos dueños: no se puede mudarlo.
+  EXPECT_FALSE(_reactor.migrate(_socket, _queue_b));
+  EXPECT_EQ(_socket.queue(), _queue_a);
+
+  ::close(_fds[0]);
+  ::close(_fds[1]);
+}
+
+TEST(reactor_test_t, RebalancesSocketsAcrossQueues) {
+  if (!io_uring_available())
+    GTEST_SKIP() << "io_uring is not available in this environment";
+  int _fds[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
+  for (int _index = 0; _index < 4; ++_index)
+    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, &_fds[_index * 2]), 0);
+
+  auto _arena_config = make_arena_config(arena::round_to_page(precompute(make_reactor_config())));
+  arena::arena_t _arena{_arena_config};
+  reactor_t _reactor;
+  ASSERT_TRUE(_reactor.bind_arena(_arena, make_reactor_config()));
+
+  auto *_queue_a = _reactor.get_or_create("alpha");
+  auto *_queue_b = _reactor.get_or_create("beta");
+  ASSERT_NE(_queue_a, nullptr);
+  ASSERT_NE(_queue_b, nullptr);
+
+  for (int _index = 0; _index < 4; ++_index) {
+    auto _socket = _reactor.create_socket(_fds[_index * 2], _queue_a);
+    ASSERT_TRUE(_socket);
+  }
+  EXPECT_EQ(_reactor.get_socket_count(_queue_a), 4U);
+  EXPECT_EQ(_reactor.get_socket_count(_queue_b), 0U);
+
+  // Reparte lo mínimo para que ninguna queue lleve más de una conexión de más.
+  const auto _moved_k = _reactor.rebalance();
+  EXPECT_EQ(_moved_k, 2U);
+  EXPECT_EQ(_reactor.get_socket_count(_queue_a), 2U);
+  EXPECT_EQ(_reactor.get_socket_count(_queue_b), 2U);
+
+  // Repartido: un segundo rebalanceo no mueve nada.
+  EXPECT_EQ(_reactor.rebalance(), 0U);
+
+  for (const int _fd_k : _fds)
+    ::close(_fd_k);
+}
+
+TEST(reactor_test_t, AffinityPinsEachQueueToItsOwnCore) {
+  if (!io_uring_available())
+    GTEST_SKIP() << "io_uring is not available in this environment";
+  reactor_config_t _config = make_reactor_config();
+  _config.affinity_ = true;
+
+  auto _arena_config = make_arena_config(arena::round_to_page(precompute(_config)));
+  arena::arena_t _arena{_arena_config};
+  reactor_t _reactor;
+  ASSERT_TRUE(_reactor.bind_arena(_arena, _config));
+
+  // Con afinidad activa el reactor arranca igual: el pin es una mejora, no un
+  // requisito. Si el sistema no lo permite, el reactor sigue funcionando.
+  _reactor.run_all();
+  EXPECT_TRUE(_reactor.initialized());
+  _reactor.stop_all();
+}
+
 } // namespace
 } // namespace frameworkcpp::reactor

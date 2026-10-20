@@ -24,8 +24,12 @@ class reactor_t {
     bool bind_arena(arena::arena_t &arena, const reactor_config_t &config) noexcept;
     [[nodiscard]] bool initialized() const noexcept;
 
-    queue_t *get_or_create(std::string_view name) noexcept;
-    socket_t create_socket(int fd, queue_t *queue) noexcept;
+    queue_t *get_or_create(std::string_view name) const noexcept;
+    socket_t create_socket(int fd, queue_t *queue) const noexcept;
+
+    bool migrate(socket_t &socket, queue_t *target) noexcept;
+    [[nodiscard]] std::size_t rebalance() const noexcept;
+    [[nodiscard]] std::size_t get_socket_count(queue_t *queue) const noexcept;
 
     void run_all() noexcept;
     void stop_all() noexcept;
@@ -91,6 +95,54 @@ descriptor: closing it is your job, or call `socket_t::close()`.
   or the socket table is full.
 - The socket is not registered with the kernel here. You post the operations;
   the first `accept`, `recv` or `connect` is what arms the `io_uring` ring.
+
+## migrate
+
+```cpp
+bool migrate(socket_t &socket, queue_t *target) noexcept;
+```
+
+Moves a socket to another queue without closing it. The connection stays alive:
+its next operations are served by the target queue's thread. This is what lets
+you balance connections across threads while the system is running.
+
+- Returns `false` when the socket has operations in flight. A socket with a
+  pending read belongs to the queue that will complete it, so moving it would
+  leave the connection with two owners.
+- Returns `false` when the socket is not registered or the target is null.
+- The socket's strand moves with it: the strand id is interpreted in the target
+  queue from now on.
+
+```cpp
+if (!socket.is_idle())
+    return;                            // busy: try again later
+reactor.migrate(socket, quietest_queue);
+```
+
+## rebalance
+
+```cpp
+[[nodiscard]] std::size_t rebalance() const noexcept;
+```
+
+Moves idle sockets from the busiest queue to the quietest one, until no queue
+carries more than one connection more than another. It moves as few sockets as
+possible: churn costs a cache miss on each side.
+
+- Returns how many sockets moved.
+- Busy sockets are left alone; they move in a later round.
+- Returns 0 when there is one queue, or when the queues are already balanced.
+
+Call it from a slow path — a timer tick, a health check — not from the hot
+loop.
+
+## get_socket_count
+
+```cpp
+[[nodiscard]] std::size_t get_socket_count(queue_t *queue) const noexcept;
+```
+
+How many sockets a queue currently serves. Useful to observe the balance.
 
 ## queue_t::post
 
@@ -177,3 +229,6 @@ struct op_result_t {
 - **No blocking `post`.** A full pool is reported, not waited on.
 - **No timers yet.** `op_kind_t::timer_` exists in the vocabulary but completes
   immediately; a real deadline timer is not implemented.
+- **Migration needs an idle socket.** A socket with an operation in flight
+  cannot move, because the queue that will complete that operation has to be
+  the one that owns the connection.

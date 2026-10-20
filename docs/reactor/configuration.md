@@ -22,7 +22,7 @@ struct reactor_config_t {
 | `max_jobs_per_queue_` | Operations in flight per queue. | The operation pool. When it is empty, `post` returns `false`. |
 | `max_sockets_` | Registered sockets. | A socket table entry is small, but the table is fixed. |
 | `max_strands_` | Distinct strand keys. | Strands are addressed modulo this number. |
-| `affinity_` | Whether queues are pinned to a core. | Reserved; the current build does not pin yet. |
+| `affinity_` | Whether queues are pinned to a core. | Queue *n* is pinned to CPU *n*. The pin is best-effort. |
 
 ## Sizing the arena
 
@@ -107,7 +107,9 @@ config.queues_ = 1;
 config.max_jobs_per_queue_ = 1024;
 ```
 
-**One queue per core** — the usual choice for a busy server:
+**One queue per core** — the usual choice for a busy server. With `affinity_`
+on, queue *n* stays on CPU *n*, so its cache stays warm and the event loop
+never migrates between cores:
 
 ```cpp
 reactor_config_t config;
