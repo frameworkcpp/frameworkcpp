@@ -12,6 +12,11 @@ namespace frameworkcpp::reactor::detail {
 
 // Una operación pre-reservada en arena. Se rellena al postear y se consume
 // al completarse. No hay heap: todo vive en el slice del reactor.
+//
+// El op lleva su propio almacenamiento de direcciones porque el kernel
+// escribe ahí la dirección del peer (accept, recvfrom) y la dirección de
+// destino (sendto), y esos datos tienen que sobrevivir hasta que la
+// operación se complete.
 struct op_t {
   op_kind_t kind_ = op_kind_t::custom_;
   int fd_ = -1;
@@ -28,6 +33,12 @@ struct op_t {
   op_result_t result_{};
   bool done_ = false;
   op_t *next_ = nullptr; // para cadenas intrusivas de strand
+
+  // Almacenamiento de direcciones de la operación.
+  sockaddr_storage peer_{}; // peer de accept/recvfrom, destino de sendto
+  socklen_t peer_len_ = 0;
+  struct msghdr message_ {};
+  struct iovec iov_ {};
 }; // struct op_t
 
 } // namespace frameworkcpp::reactor::detail

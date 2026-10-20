@@ -26,6 +26,12 @@ class reactor_t {
 
     queue_t *get_or_create(std::string_view name) const noexcept;
     socket_t create_socket(int fd, queue_t *queue) const noexcept;
+    socket_t open_socket(int family, int type, int protocol, queue_t *queue) const noexcept;
+    socket_t listen_tcp(queue_t *queue, const sockaddr *addr, std::size_t addr_len,
+                        int backlog = 128) const noexcept;
+    socket_t listen_unix(queue_t *queue, const char *path, int backlog = 128) const noexcept;
+    socket_t bind_udp(queue_t *queue, const sockaddr *addr, std::size_t addr_len) const noexcept;
+    socket_t open_icmp(queue_t *queue) const noexcept;
 
     std::uint64_t schedule_timer(queue_t *queue, std::uint64_t delay_ns,
                                   reactor_fn_t fn, void *ctx,
@@ -180,6 +186,61 @@ possible: churn costs a cache miss on each side.
 
 Call it from a slow path — a timer tick, a health check — not from the hot
 loop.
+
+## Creating sockets
+
+The reactor can create the sockets for you, so a server does not have to
+drop down to raw syscalls before it can hand a descriptor over.
+
+```cpp
+socket_t open_socket(int family, int type, int protocol, queue_t *queue) const noexcept;
+```
+
+Creates a socket with `socket(2)` and registers it in the queue. `family` is
+`AF_INET`, `AF_INET6` or `AF_UNIX`; `type` is `SOCK_STREAM` or `SOCK_DGRAM`.
+
+- Returns an invalid socket when the creation fails or the socket table is
+  full. On failure nothing is leaked: the descriptor is closed.
+
+The named helpers build on it:
+
+```cpp
+// Servidor TCP: socket + bind + listen
+socket_t listen_tcp(queue_t *queue, const sockaddr *addr, std::size_t addr_len,
+                    int backlog = 128) const noexcept;
+
+// Servidor Unix domain
+socket_t listen_unix(queue_t *queue, const char *path, int backlog = 128) const noexcept;
+
+// Socket UDP enlazado
+socket_t bind_udp(queue_t *queue, const sockaddr *addr, std::size_t addr_len) const noexcept;
+
+// Socket ICMP (raw). Necesita privilegios.
+socket_t open_icmp(queue_t *queue) const noexcept;
+```
+
+`listen_unix` removes a stale socket file if the bind fails, so a restart does
+not trip over the leftovers of the previous run.
+
+## Datagrams
+
+```cpp
+bool send_to(const void *buffer, std::size_t len, const sockaddr *addr,
+             std::size_t addr_len, reactor_fn_t fn, void *ctx,
+             std::uint64_t strand_id = 0) noexcept;
+bool recv_from(void *buffer, std::size_t len, reactor_fn_t fn, void *ctx,
+               std::uint64_t strand_id = 0) noexcept;
+[[nodiscard]] const sockaddr *last_peer() const noexcept;
+```
+
+`send_to` sends a datagram to a specific address; `recv_from` receives one.
+The destination address is copied into the operation, so it does not have to
+outlive the call.
+
+`last_peer` returns the address of the sender of the last datagram the socket
+received, or null when it has not received one. It is only meaningful for a
+socket with one pending receive, which is the usual shape of a datagram
+server.
 
 ## get_socket_count
 

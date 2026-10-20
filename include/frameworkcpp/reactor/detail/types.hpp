@@ -14,11 +14,14 @@ enum class op_kind_t : std::uint8_t {
   connect_ = 3,
   timer_ = 4,
   custom_ = 5,
+  sendto_ = 6,
+  recvfrom_ = 7,
 }; // enum class op_kind_t
 
 struct op_result_t {
   int ec_ = 0;            // 0 = éxito, errno positivo si error
   std::size_t bytes_ = 0; // bytes transferidos
+  int fd_ = -1;           // descriptor aceptado (solo en accept), -1 si no aplica
 }; // struct op_result_t
 
 // Firma de handler sin lambdas ni captura de heap.

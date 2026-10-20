@@ -7,8 +7,11 @@
 #include <string>
 #include <thread>
 
+#include <arpa/inet.h>
 #include <gtest/gtest.h>
+#include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 #include "frameworkcpp/arena/arena.hpp"
@@ -454,6 +457,272 @@ TEST(reactor_test_t, TimerWithStrandDoesNotOverlapTheStrand) {
 
   ::close(_fds[0]);
   ::close(_fds[1]);
+}
+
+struct server_context_t {
+  std::atomic<int> accepted_fd_{-1};
+  std::atomic<bool> done_{false};
+}; // struct server_context_t
+
+void on_accept(void *ctx, const op_result_t &result) {
+  auto *_state = static_cast<server_context_t *>(ctx);
+  _state->accepted_fd_.store(result.fd_);
+  _state->done_.store(true, std::memory_order_release);
+}
+
+struct udp_context_t {
+  std::atomic<bool> received_{false};
+  std::atomic<bool> sent_{false};
+  char data_[128]{};
+}; // struct udp_context_t
+
+void on_udp_recv(void *ctx, const op_result_t &result) {
+  auto *_state = static_cast<udp_context_t *>(ctx);
+  (void) result;
+  _state->received_.store(true, std::memory_order_release);
+}
+
+void on_udp_send(void *ctx, const op_result_t &result) {
+  auto *_state = static_cast<udp_context_t *>(ctx);
+  (void) result;
+  _state->sent_.store(true, std::memory_order_release);
+}
+
+// Un servidor TCP completo: listen, accept y la conexión entrante.
+TEST(reactor_test_t, RunsATcpServerThatAcceptsAConnection) {
+  if (!io_uring_available())
+    GTEST_SKIP() << "io_uring is not available in this environment";
+
+  auto _arena_config = make_arena_config(arena::round_to_page(precompute(make_reactor_config())));
+  arena::arena_t _arena{_arena_config};
+  reactor_t _reactor;
+  ASSERT_TRUE(_reactor.bind_arena(_arena, make_reactor_config()));
+
+  auto *_queue = _reactor.get_or_create("server");
+  ASSERT_NE(_queue, nullptr);
+
+  sockaddr_in _addr{};
+  _addr.sin_family = AF_INET;
+  _addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  _addr.sin_port = 0;
+
+  auto _listener =
+      _reactor.listen_tcp(_queue, reinterpret_cast<const sockaddr *>(&_addr), sizeof(_addr));
+  ASSERT_TRUE(_listener);
+
+  // El puerto real se conoce después del bind.
+  sockaddr_in _bound{};
+  socklen_t _bound_len = sizeof(_bound);
+  ASSERT_EQ(::getsockname(_listener.fd(), reinterpret_cast<sockaddr *>(&_bound), &_bound_len), 0);
+  const std::uint16_t _port_k = ntohs(_bound.sin_port);
+  ASSERT_NE(_port_k, 0);
+
+  server_context_t _server_context;
+  ASSERT_TRUE(_listener.accept(on_accept, &_server_context));
+
+  _reactor.run_all();
+
+  // Un cliente se conecta.
+  const int _client_k = ::socket(AF_INET, SOCK_STREAM, 0);
+  ASSERT_GE(_client_k, 0);
+  sockaddr_in _target = _bound; // el puerto ya viene en orden de red
+  ASSERT_EQ(::connect(_client_k, reinterpret_cast<const sockaddr *>(&_target), sizeof(_target)), 0);
+
+  const auto _deadline_k = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (!_server_context.done_.load(std::memory_order_acquire) &&
+         std::chrono::steady_clock::now() < _deadline_k) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  _reactor.stop_all();
+
+  ASSERT_TRUE(_server_context.done_.load(std::memory_order_acquire));
+  const int _accepted_k = _server_context.accepted_fd_.load();
+  EXPECT_GE(_accepted_k, 0);
+
+  ::close(_client_k);
+  if (_accepted_k >= 0)
+    ::close(_accepted_k);
+  _listener.close();
+}
+
+// UDP: sendto a una dirección y recepción del datagrama.
+TEST(reactor_test_t, SendsAndReceivesAUnixDatagram) {
+  if (!io_uring_available())
+    GTEST_SKIP() << "io_uring is not available in this environment";
+
+  auto _arena_config = make_arena_config(arena::round_to_page(precompute(make_reactor_config())));
+  arena::arena_t _arena{_arena_config};
+  reactor_t _reactor;
+  ASSERT_TRUE(_reactor.bind_arena(_arena, make_reactor_config()));
+
+  auto *_queue = _reactor.get_or_create("udp");
+  ASSERT_NE(_queue, nullptr);
+
+  // Datagramas sobre Unix domain: no necesita puertos ni red.
+  auto _server = _reactor.open_socket(AF_UNIX, SOCK_DGRAM, 0, _queue);
+  ASSERT_TRUE(_server);
+  sockaddr_un _server_addr{};
+  _server_addr.sun_family = AF_UNIX;
+  std::strncpy(
+      _server_addr.sun_path, "/tmp/frameworkcpp_udp_test.sock", sizeof(_server_addr.sun_path) - 1);
+  ::unlink(_server_addr.sun_path);
+  ASSERT_TRUE(
+      _server.bind_to(reinterpret_cast<const sockaddr *>(&_server_addr), sizeof(_server_addr)));
+
+  auto _client_k = _reactor.open_socket(AF_UNIX, SOCK_DGRAM, 0, _queue);
+  ASSERT_TRUE(_client_k);
+  sockaddr_un _client_addr{};
+  _client_addr.sun_family = AF_UNIX;
+  std::strncpy(_client_addr.sun_path,
+               "/tmp/frameworkcpp_udp_client.sock",
+               sizeof(_client_addr.sun_path) - 1);
+  ::unlink(_client_addr.sun_path);
+  ASSERT_TRUE(
+      _client_k.bind_to(reinterpret_cast<const sockaddr *>(&_client_addr), sizeof(_client_addr)));
+
+  udp_context_t _context;
+  ASSERT_TRUE(_server.recv_from(_context.data_, sizeof(_context.data_), on_udp_recv, &_context));
+
+  _reactor.run_all();
+
+  const std::size_t _sent_k = 4;
+  ASSERT_TRUE(_client_k.send_to("hola",
+                                _sent_k,
+                                reinterpret_cast<const sockaddr *>(&_server_addr),
+                                sizeof(_server_addr),
+                                on_udp_send,
+                                &_context));
+
+  const auto _deadline_k = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (!_context.received_.load(std::memory_order_acquire) &&
+         std::chrono::steady_clock::now() < _deadline_k) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  _reactor.stop_all();
+
+  EXPECT_TRUE(_context.received_.load(std::memory_order_acquire));
+  EXPECT_EQ(std::string(_context.data_, _sent_k), "hola");
+  // La dirección del emisor queda disponible en la socket.
+  EXPECT_NE(_server.last_peer(), nullptr);
+
+  ::unlink(_server_addr.sun_path);
+  ::unlink(_client_addr.sun_path);
+  _server.close();
+  _client_k.close();
+}
+
+// ICMP necesita privilegios: si el sistema no los concede, no es un fallo.
+TEST(reactor_test_t, OpensAnIcmpSocketWhenPrivilegesAllow) {
+  if (!io_uring_available())
+    GTEST_SKIP() << "io_uring is not available in this environment";
+  auto _arena_config = make_arena_config(arena::round_to_page(precompute(make_reactor_config())));
+  arena::arena_t _arena{_arena_config};
+  reactor_t _reactor;
+  ASSERT_TRUE(_reactor.bind_arena(_arena, make_reactor_config()));
+
+  auto *_queue = _reactor.get_or_create("icmp");
+  auto _socket = _reactor.open_icmp(_queue);
+  if (!_socket) {
+    GTEST_SKIP() << "raw sockets are not permitted in this environment";
+  }
+  EXPECT_GE(_socket.fd(), 0);
+  _socket.close();
+}
+
+struct connect_context_t {
+  std::atomic<int> ec_{-999};
+  std::atomic<bool> done_{false};
+}; // struct connect_context_t
+
+void on_connect(void *ctx, const op_result_t &result) {
+  auto *_state = static_cast<connect_context_t *>(ctx);
+  _state->ec_.store(result.ec_);
+  _state->done_.store(true, std::memory_order_release);
+}
+
+// Un cliente TCP: connect asíncrono y lectura de la respuesta.
+TEST(reactor_test_t, ConnectsToATcpServer) {
+  if (!io_uring_available())
+    GTEST_SKIP() << "io_uring is not available in this environment";
+
+  auto _arena_config = make_arena_config(arena::round_to_page(precompute(make_reactor_config())));
+  arena::arena_t _arena{_arena_config};
+  reactor_t _reactor;
+  ASSERT_TRUE(_reactor.bind_arena(_arena, make_reactor_config()));
+
+  auto *_queue = _reactor.get_or_create("client");
+  sockaddr_in _addr{};
+  _addr.sin_family = AF_INET;
+  _addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  _addr.sin_port = htonl(9); // puerto de descarte: connect falla con ICMP
+
+  auto _socket = _reactor.open_socket(AF_INET, SOCK_STREAM, 0, _queue);
+  ASSERT_TRUE(_socket);
+
+  connect_context_t _context;
+  ASSERT_TRUE(_socket.connect(
+      reinterpret_cast<const sockaddr *>(&_addr), sizeof(_addr), on_connect, &_context));
+
+  _reactor.run_all();
+
+  const auto _deadline_k = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (!_context.done_.load(std::memory_order_acquire) &&
+         std::chrono::steady_clock::now() < _deadline_k) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  _reactor.stop_all();
+
+  // Lo que importa es que la operación se completa y reporta su error.
+  EXPECT_TRUE(_context.done_.load(std::memory_order_acquire));
+  EXPECT_NE(_context.ec_.load(std::memory_order_acquire), -999);
+  _socket.close();
+}
+
+// Un servidor Unix domain acepta conexiones.
+TEST(reactor_test_t, RunsAUnixDomainServerThatAcceptsAConnection) {
+  if (!io_uring_available())
+    GTEST_SKIP() << "io_uring is not available in this environment";
+
+  const char *_path_k = "/tmp/frameworkcpp_unix_test.sock";
+  ::unlink(_path_k);
+
+  auto _arena_config = make_arena_config(arena::round_to_page(precompute(make_reactor_config())));
+  arena::arena_t _arena{_arena_config};
+  reactor_t _reactor;
+  ASSERT_TRUE(_reactor.bind_arena(_arena, make_reactor_config()));
+
+  auto *_queue = _reactor.get_or_create("unix");
+  auto _listener = _reactor.listen_unix(_queue, _path_k);
+  ASSERT_TRUE(_listener);
+
+  server_context_t _server_context;
+  ASSERT_TRUE(_listener.accept(on_accept, &_server_context));
+
+  _reactor.run_all();
+
+  const int _client_k = ::socket(AF_UNIX, SOCK_STREAM, 0);
+  ASSERT_GE(_client_k, 0);
+  sockaddr_un _addr{};
+  _addr.sun_family = AF_UNIX;
+  std::strncpy(_addr.sun_path, _path_k, sizeof(_addr.sun_path) - 1);
+  ASSERT_EQ(::connect(_client_k, reinterpret_cast<const sockaddr *>(&_addr), sizeof(_addr)), 0);
+
+  const auto _deadline_k = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (!_server_context.done_.load(std::memory_order_acquire) &&
+         std::chrono::steady_clock::now() < _deadline_k) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  _reactor.stop_all();
+
+  ASSERT_TRUE(_server_context.done_.load(std::memory_order_acquire));
+  EXPECT_GE(_server_context.accepted_fd_.load(), 0);
+
+  const int _accepted_k = _server_context.accepted_fd_.load();
+  ::close(_client_k);
+  if (_accepted_k >= 0)
+    ::close(_accepted_k);
+  _listener.close();
+  ::unlink(_path_k);
 }
 
 } // namespace

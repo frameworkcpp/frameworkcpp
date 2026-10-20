@@ -187,9 +187,18 @@ until then (capped at a millisecond so a stop request is noticed promptly).
 A timer with a strand does not run when it expires: it joins the strand's
 queue, so it cannot overlap the operation the strand is busy with.
 
-## What is not implemented yet
+## Addresses live in the operation
 
-- **UDP, ICMP and Unix sockets.** The `io_uring` operations exist in the
-  vocabulary, but only TCP-style `accept`/`recv`/`send`/`connect` are wired up.
+The kernel writes the peer's address into the operation for `accept` and
+`recvfrom`, and reads the destination from it for `sendto` and `connect`. That
+address has to survive until the completion arrives, so each operation carries
+its own `sockaddr_storage` and `msghdr`.
+
+The cost is size: an operation is a few hundred bytes, not a few dozen. It is
+memory you pay for once, at compile time, out of the arena — and a queue's
+operation pool is sized by `max_jobs_per_queue_`, so a system that does not
+need datagrams can keep that number small.
+
+## What is not implemented yet
 - **Automatic rebalancing.** `rebalance()` is a call you make; the reactor does
   not run it on a schedule on its own.

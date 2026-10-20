@@ -60,7 +60,9 @@ class queue_t {
             void *ctx,
             std::uint64_t strand_id = 0,
             int priority = 0,
-            std::uint64_t socket_id = 0) noexcept;
+            std::uint64_t socket_id = 0,
+            const sockaddr *addr = nullptr,
+            std::size_t addr_len = 0) noexcept;
 
   // Loop de eventos del hilo dueño de esta queue. Bloqueante.
   void run() noexcept;
@@ -111,6 +113,31 @@ class socket_t {
                void *ctx,
                std::uint64_t strand_id = 0) noexcept;
 
+  // Enlaza el socket a una dirección local (setup, no hot path).
+  bool bind_to(const sockaddr *addr, std::size_t addr_len) const noexcept;
+
+  // Pone el socket en modo escucha (setup, no hot path).
+  [[nodiscard]] bool listen_to(int backlog) const noexcept;
+
+  // Envía un datagrama a una dirección concreta (UDP).
+  bool send_to(const void *buffer,
+               std::size_t len,
+               const sockaddr *addr,
+               std::size_t addr_len,
+               reactor_fn_t fn,
+               void *ctx,
+               std::uint64_t strand_id = 0) noexcept;
+
+  // Recibe un datagrama y guarda la dirección del emisor en la socket.
+  bool recv_from(void *buffer,
+                 std::size_t len,
+                 reactor_fn_t fn,
+                 void *ctx,
+                 std::uint64_t strand_id = 0) noexcept;
+
+  // Dirección del último datagrama recibido.
+  [[nodiscard]] const sockaddr *last_peer() const noexcept;
+
   void close() noexcept;
 
   private:
@@ -158,6 +185,28 @@ class reactor_t {
   // Registra un fd en una queue. Devuelve un socket no válido si no hay
   // slots libres o la queue es nula.
   socket_t create_socket(int fd, queue_t *queue) const noexcept;
+
+  // Crea un socket del sistema y lo registra en una queue. `family_` es
+  // AF_INET / AF_INET6 / AF_UNIX, `type_` es SOCK_STREAM / SOCK_DGRAM.
+  //
+  // Devuelve un socket no válido si la creación falla o no hay slots libres.
+  socket_t open_socket(int family, int type, int protocol, queue_t *queue) const noexcept;
+
+  // Servidor TCP: crea el socket, lo enlaza y lo pone en modo escucha.
+  socket_t listen_tcp(queue_t *queue,
+                      const sockaddr *addr,
+                      std::size_t addr_len,
+                      int backlog = 128) const noexcept;
+
+  // Servidor Unix domain: igual que listen_tcp, sobre un path.
+  socket_t listen_unix(queue_t *queue, const char *path, int backlog = 128) const noexcept;
+
+  // Socket UDP enlazado a una dirección local.
+  socket_t bind_udp(queue_t *queue, const sockaddr *addr, std::size_t addr_len) const noexcept;
+
+  // Socket ICMP (raw). Necesita privilegios: devuelve un socket no válido si
+  // el sistema no los concede.
+  socket_t open_icmp(queue_t *queue) const noexcept;
 
   // Mueve un socket a otra queue sin cerrarlo: la conexión sigue viva y sus
   // próximas operaciones las atiende el hilo de la queue destino. Es lo que

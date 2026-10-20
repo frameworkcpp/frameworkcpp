@@ -42,6 +42,9 @@ struct socket_slot_t {
   int fd_ = -1;
   queue_t *queue_ = nullptr;
   std::uint64_t socket_id_ = 0;
+  // Dirección del emisor del último datagrama recibido.
+  sockaddr_storage peer_{};
+  socklen_t peer_len_ = 0;
   // Operaciones en vuelo para este socket. While it is not zero the socket
   // cannot be migrated to another queue.
   std::atomic<std::uint32_t> inflight_{0};

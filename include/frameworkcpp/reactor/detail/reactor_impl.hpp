@@ -8,7 +8,9 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <netinet/in.h>
 #include <new>
+#include <sys/un.h>
 #include <thread>
 #include <vector>
 
@@ -275,6 +277,69 @@ inline std::uint64_t reactor_t::next_timer_id() noexcept {
   return timer_id_.fetch_add(1, std::memory_order_relaxed);
 }
 
+inline socket_t
+reactor_t::open_socket(int family, int type, int protocol, queue_t *queue) const noexcept {
+  socket_t _socket{};
+  if (!bound_ || queue == nullptr)
+    return _socket;
+  const int _fd_k = ::socket(family, type, protocol);
+  if (_fd_k < 0)
+    return _socket;
+  _socket = create_socket(_fd_k, queue);
+  if (!_socket) {
+    ::close(_fd_k);
+    return _socket;
+  }
+  return _socket;
+}
+
+inline socket_t reactor_t::listen_tcp(queue_t *queue,
+                                      const sockaddr *addr,
+                                      std::size_t addr_len,
+                                      int backlog) const noexcept {
+  socket_t _socket = open_socket(AF_INET, SOCK_STREAM, 0, queue);
+  if (!_socket)
+    return _socket;
+  if (!_socket.bind_to(addr, addr_len) || !_socket.listen_to(backlog)) {
+    _socket.close();
+    return socket_t{};
+  }
+  return _socket;
+}
+
+inline socket_t
+reactor_t::listen_unix(queue_t *queue, const char *path, int backlog) const noexcept {
+  socket_t _socket = open_socket(AF_UNIX, SOCK_STREAM, 0, queue);
+  if (!_socket)
+    return _socket;
+  sockaddr_un _addr{};
+  _addr.sun_family = AF_UNIX;
+  std::strncpy(_addr.sun_path, path, sizeof(_addr.sun_path) - 1);
+  if (!_socket.bind_to(reinterpret_cast<const sockaddr *>(&_addr), sizeof(_addr)) ||
+      !_socket.listen_to(backlog)) {
+    _socket.close();
+    ::unlink(path);
+    return socket_t{};
+  }
+  return _socket;
+}
+
+inline socket_t
+reactor_t::bind_udp(queue_t *queue, const sockaddr *addr, std::size_t addr_len) const noexcept {
+  socket_t _socket = open_socket(AF_INET, SOCK_DGRAM, 0, queue);
+  if (!_socket)
+    return _socket;
+  if (!_socket.bind_to(addr, addr_len)) {
+    _socket.close();
+    return socket_t{};
+  }
+  return _socket;
+}
+
+inline socket_t reactor_t::open_icmp(queue_t *queue) const noexcept {
+  return open_socket(AF_INET, SOCK_RAW, IPPROTO_ICMP, queue);
+}
+
 inline bool reactor_t::migrate(socket_t &socket, queue_t *target) noexcept {
   if (!bound_ || target == nullptr || socket.id_ == 0)
     return false;
@@ -445,9 +510,22 @@ inline void reactor_t::complete_op(detail::queue_control_t *qc, struct io_uring_
   if (_index_k >= qc->ops_segment_size_)
     return;
   auto *_op = &qc->ops_segment_[_index_k];
-  const auto _res_k = cqe->res;
+  const long _res_k = cqe->res;
   _op->result_.ec_ = (_res_k < 0) ? static_cast<int>(-_res_k) : 0;
   _op->result_.bytes_ = (_res_k >= 0) ? static_cast<std::size_t>(_res_k) : 0;
+  // En accept, el resultado del kernel es el descriptor de la conexión
+  // aceptada: es lo que el handler necesita para registrarlo.
+  _op->result_.fd_ =
+      (_op->kind_ == op_kind_t::accept_ && _res_k >= 0) ? static_cast<int>(_res_k) : -1;
+  // En recvfrom, el kernel dejó la dirección del emisor en el op.
+  if (_op->kind_ == op_kind_t::recvfrom_ && _op->socket_id_ != 0 &&
+      _op->socket_id_ <= qc->num_sockets_) {
+    const socklen_t _peer_len_k = _op->message_.msg_namelen;
+    if (_peer_len_k != 0) {
+      qc->sockets_[_op->socket_id_ - 1].peer_ = _op->peer_;
+      qc->sockets_[_op->socket_id_ - 1].peer_len_ = _peer_len_k;
+    }
+  }
   if (_op->fn_ != nullptr)
     _op->fn_(_op->ctx_, _op->result_);
   if (_op->strand_id_ != 0) {
@@ -489,9 +567,47 @@ inline void reactor_t::execute_op(detail::queue_control_t *qc, detail::op_t *op)
       qc->op_queue_.push(op);
       return;
     }
-    sockaddr _addr{};
-    socklen_t _addr_len = sizeof(_addr);
-    io_uring_prep_accept(_sqe, op->fd_, &_addr, &_addr_len, 0);
+    // La dirección del peer se escribe en el propio op: es el único sitio
+    // donde puede vivir hasta que llegue la completación.
+    op->peer_len_ = sizeof(sockaddr_storage);
+    io_uring_prep_accept(
+        _sqe, op->fd_, reinterpret_cast<sockaddr *>(&op->peer_), &op->peer_len_, 0);
+    _sqe->user_data = _index_k;
+    (void) qc->ring_.submit(1);
+    break;
+  }
+  case op_kind_t::sendto_: {
+    auto *_sqe = qc->ring_.acquire_sqe();
+    if (_sqe == nullptr) {
+      qc->op_queue_.push(op);
+      return;
+    }
+    io_uring_prep_sendto(_sqe,
+                         op->fd_,
+                         op->buffer_,
+                         op->len_,
+                         0,
+                         reinterpret_cast<const sockaddr *>(&op->peer_),
+                         op->peer_len_);
+    _sqe->user_data = _index_k;
+    (void) qc->ring_.submit(1);
+    break;
+  }
+  case op_kind_t::recvfrom_: {
+    auto *_sqe = qc->ring_.acquire_sqe();
+    if (_sqe == nullptr) {
+      qc->op_queue_.push(op);
+      return;
+    }
+    // recvmsg deja el datagrama en el buffer y la dirección del emisor en
+    // msg_name, que apunta al almacenamiento del propio op.
+    op->iov_.iov_base = op->buffer_;
+    op->iov_.iov_len = op->len_;
+    op->message_.msg_name = &op->peer_;
+    op->message_.msg_namelen = sizeof(op->peer_);
+    op->message_.msg_iov = &op->iov_;
+    op->message_.msg_iovlen = 1;
+    io_uring_prep_recvmsg(_sqe, op->fd_, &op->message_, 0);
     _sqe->user_data = _index_k;
     (void) qc->ring_.submit(1);
     break;
@@ -502,7 +618,8 @@ inline void reactor_t::execute_op(detail::queue_control_t *qc, detail::op_t *op)
       qc->op_queue_.push(op);
       return;
     }
-    io_uring_prep_connect(_sqe, op->fd_, nullptr, 0);
+    io_uring_prep_connect(
+        _sqe, op->fd_, reinterpret_cast<const sockaddr *>(&op->peer_), op->peer_len_);
     _sqe->user_data = _index_k;
     (void) qc->ring_.submit(1);
     break;
@@ -547,7 +664,9 @@ inline bool queue_t::post(op_kind_t kind,
                           void *ctx,
                           std::uint64_t strand_id,
                           int priority,
-                          std::uint64_t socket_id) noexcept {
+                          std::uint64_t socket_id,
+                          const sockaddr *addr,
+                          std::size_t addr_len) noexcept {
   if (control_ == nullptr || ops_segment_ == nullptr)
     return false;
   for (std::size_t _index = 0; _index < ops_segment_size_; ++_index) {
@@ -562,6 +681,12 @@ inline bool queue_t::post(op_kind_t kind,
       _op->strand_id_ = strand_id;
       _op->socket_id_ = socket_id;
       _op->priority_ = priority;
+      if (addr != nullptr && addr_len > 0) {
+        std::memcpy(&_op->peer_, addr, addr_len);
+        _op->peer_len_ = static_cast<socklen_t>(addr_len);
+      } else {
+        _op->peer_len_ = 0;
+      }
       _op->result_ = op_result_t{};
       _op->done_ = false;
       _op->next_ = nullptr;
@@ -640,9 +765,76 @@ inline bool socket_t::connect(const sockaddr *addr,
                               reactor_fn_t fn,
                               void *ctx,
                               std::uint64_t strand_id) noexcept {
-  (void) addr;
-  (void) addr_len;
-  return post_op(op_kind_t::connect_, nullptr, 0, fn, ctx, strand_id);
+  if (queue_ == nullptr || addr == nullptr || addr_len == 0)
+    return false;
+  if (addr_len > sizeof(sockaddr_storage))
+    return false;
+  detail::socket_slot_t *_slot = slot();
+  if (_slot == nullptr)
+    return false;
+  _slot->inflight_.fetch_add(1, std::memory_order_acq_rel);
+  if (!queue_->post(
+          op_kind_t::connect_, fd_, nullptr, 0, fn, ctx, strand_id, 0, id_, addr, addr_len)) {
+    _slot->inflight_.fetch_sub(1, std::memory_order_release);
+    return false;
+  }
+  return true;
+}
+
+inline bool socket_t::bind_to(const sockaddr *addr, std::size_t addr_len) const noexcept {
+  if (fd_ < 0 || addr == nullptr)
+    return false;
+  return ::bind(fd_, addr, static_cast<socklen_t>(addr_len)) == 0;
+}
+
+inline bool socket_t::listen_to(int backlog) const noexcept {
+  if (fd_ < 0)
+    return false;
+  return ::listen(fd_, backlog) == 0;
+}
+
+inline const sockaddr *socket_t::last_peer() const noexcept {
+  const detail::socket_slot_t *_slot = slot();
+  if (_slot == nullptr || _slot->peer_len_ == 0)
+    return nullptr;
+  return reinterpret_cast<const sockaddr *>(&_slot->peer_);
+}
+
+inline bool socket_t::send_to(const void *buffer,
+                              std::size_t len,
+                              const sockaddr *addr,
+                              std::size_t addr_len,
+                              reactor_fn_t fn,
+                              void *ctx,
+                              std::uint64_t strand_id) noexcept {
+  if (queue_ == nullptr || addr == nullptr || addr_len == 0)
+    return false;
+  if (addr_len > sizeof(sockaddr_storage))
+    return false;
+  detail::socket_slot_t *_slot = slot();
+  if (_slot == nullptr)
+    return false;
+  _slot->inflight_.fetch_add(1, std::memory_order_acq_rel);
+  if (!queue_->post(op_kind_t::sendto_,
+                    fd_,
+                    const_cast<void *>(buffer),
+                    len,
+                    fn,
+                    ctx,
+                    strand_id,
+                    0,
+                    id_,
+                    addr,
+                    addr_len)) {
+    _slot->inflight_.fetch_sub(1, std::memory_order_release);
+    return false;
+  }
+  return true;
+}
+
+inline bool socket_t::recv_from(
+    void *buffer, std::size_t len, reactor_fn_t fn, void *ctx, std::uint64_t strand_id) noexcept {
+  return post_op(op_kind_t::recvfrom_, buffer, len, fn, ctx, strand_id);
 }
 
 inline void socket_t::close() noexcept {

@@ -57,7 +57,7 @@ request arrives.
    auto *queue = reactor.get_or_create("ingest");
    ```
 
-3. You register a socket and post operations on it. The handler is a function
+3. You create a socket and post operations on it. The handler is a function
    pointer, not a lambda:
 
    ```cpp
