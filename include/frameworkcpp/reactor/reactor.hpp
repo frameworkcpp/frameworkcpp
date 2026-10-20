@@ -15,6 +15,13 @@
 
 namespace frameworkcpp::reactor {
 
+// El contador de timers es un atomic de 64 bits que se incrementa desde
+// cualquier hilo. En una plataforma de 32 bits sin acceso exclusivo de 64
+// bits (armv6) el estandar cae a una lock: eso romperia la promesa de no
+// tener locks en el hot path, asi que se comprueba al compilar.
+static_assert(std::atomic<std::uint64_t>::is_always_lock_free,
+              "the reactor needs lock-free 64-bit atomics");
+
 // Contrato estándar de reserva de memoria en tiempo de compilación.
 // Definido al final de este header: necesita los tipos completos.
 constexpr std::size_t precompute(const reactor_config_t &config) noexcept;
@@ -179,6 +186,10 @@ class reactor_t {
 
   [[nodiscard]] bool initialized() const noexcept;
 
+  // Backend de eventos que el reactor está usando. Sirve para saber si la E/S
+  // real está disponible: con epoll no hay io_uring detrás.
+  [[nodiscard]] backend_t get_backend() const noexcept;
+
   // Devuelve la misma queue_t para el mismo nombre (idempotente).
   [[nodiscard]] queue_t *get_or_create(std::string_view name) const noexcept;
 
@@ -253,7 +264,11 @@ class reactor_t {
   private:
   static void execute_op(detail::queue_control_t *qc, detail::op_t *op) noexcept;
   static void complete_op(detail::queue_control_t *qc, struct io_uring_cqe *cqe) noexcept;
-  static void release_socket(detail::queue_control_t *qc, std::uint64_t socket_id) noexcept;
+  static void execute_io_uring_op(detail::queue_control_t *qc, detail::op_t *op) noexcept;
+  static void arm_epoll_op(detail::queue_control_t *qc, detail::op_t *op) noexcept;
+  static void run_epoll_op(detail::queue_control_t *qc, detail::op_t *op) noexcept;
+  static void handle_epoll_event(detail::queue_control_t *qc,
+                                 const struct epoll_event &event) noexcept;
   static void expire_timers(detail::queue_control_t *qc) noexcept;
   void run_queue(std::size_t index) const noexcept;
   std::uint64_t next_timer_id() noexcept;
@@ -267,6 +282,13 @@ class reactor_t {
 } // namespace frameworkcpp::reactor
 
 namespace frameworkcpp::reactor {
+
+// El contador de timers es un atomic de 64 bits que se incrementa desde
+// cualquier hilo. En una plataforma de 32 bits sin acceso exclusivo de 64
+// bits (armv6) el estandar cae a una lock: eso romperia la promesa de no
+// tener locks en el hot path, asi que se comprueba al compilar.
+static_assert(std::atomic<std::uint64_t>::is_always_lock_free,
+              "the reactor needs lock-free 64-bit atomics");
 
 // Descriptors de los buckets que el reactor carvea del arena. Es la única
 // fuente de verdad: `precompute` y `bind_arena` usan la misma tabla, así que
@@ -301,6 +323,10 @@ constexpr void make_specs(const reactor_config_t &config,
   specs[7] = {reactor_shard_tag_k + 7,
               sizeof(detail::op_t *) * _total_timers_k,
               alignof(detail::op_t *),
+              1};
+  specs[8] = {reactor_shard_tag_k + 8,
+              sizeof(struct epoll_event) * _total_ops_k,
+              alignof(struct epoll_event),
               1};
 }
 

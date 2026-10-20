@@ -36,6 +36,13 @@
 #include "frameworkcpp/environment/detail/digest.hpp"
 
 namespace frameworkcpp::environment {
+
+// La version que cada vista publica al reclamador es un atomic de 64 bits
+// escrito desde hilos distintos. Sin lock-free no habria forma de mantener la
+// promesa de reads sin locks.
+static_assert(std::atomic<std::uint64_t>::is_always_lock_free,
+              "the environment needs lock-free 64-bit atomics");
+
 namespace detail {
 
 struct control_t {

@@ -25,6 +25,32 @@ struct reactor_config_t {
 | `max_strands_` | Distinct strand keys. | Strands are addressed modulo this number. |
 | `max_timers_per_queue_` | Pending timers per queue. | A queue's timers live in their own pool, so a full timer pool never starves the I/O pool. |
 | `affinity_` | Whether queues are pinned to a core. | Queue *n* is pinned to CPU *n*. The pin is best-effort. |
+| `backend_` | Which event backend to use. | `auto_` picks `io_uring` when the kernel has it, `epoll` otherwise. |
+
+## Choosing a backend
+
+```cpp
+enum class backend_t : std::uint8_t {
+  auto_ = 0,     // io_uring si el kernel lo expone, si no epoll
+  io_uring_ = 1, // exigir io_uring: bind_arena falla si no esta
+  epoll_ = 2,    // exigir epoll
+};
+```
+
+`auto_` is the default and the right answer almost always: the reactor uses
+`io_uring` when the kernel offers it and falls back to `epoll` when it does
+not, so the same binary works on a modern server and on a kernel — or an
+emulator — without it.
+
+Force `io_uring_` when the io_uring path is the one you must have: the
+reactor then refuses to start rather than silently serving you with epoll.
+Force `epoll_` to test the portable path, or because you know the kernel's
+`io_uring` is worse than its `epoll`.
+
+The two backends are not identical in their timing: `epoll` waits in
+milliseconds and wakes once per event, while `io_uring` waits in nanoseconds
+and reaps a batch. Timers therefore fire with millisecond precision under
+`epoll` and nanosecond precision under `io_uring`.
 
 ## Sizing the arena
 

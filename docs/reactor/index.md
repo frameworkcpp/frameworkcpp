@@ -11,9 +11,15 @@ through lock-free queues. The kernel batches the syscalls, the queues never take
 a lock, and every byte of memory the module uses is reserved before the first
 request arrives.
 
-> **Requires liburing.** The reactor talks to `io_uring` through `liburing`, so
-> link it in: `-luring`. It is the one module in the framework with an external
-> dependency.
+> **Requires liburing for the fast backend.** The reactor talks to `io_uring`
+> through `liburing`, so link it in: `-luring`. It is the one module in the
+> framework with an external dependency.
+>
+> The reactor has **two backends**. `io_uring` is the one you want: the kernel
+> batches the syscalls and the hot path stops paying for them. `epoll` is the
+> portable one: it works on every Linux, including the ones that do not expose
+> `io_uring`. The reactor picks `io_uring` when the kernel has it and falls back
+> to `epoll` otherwise, so the same binary works everywhere.
 
 ```cpp
 #include <frameworkcpp/reactor/reactor.hpp>
@@ -150,6 +156,32 @@ constexpr std::size_t total_k =
 
 See [Memory reservation](../memory/reservation) for the contract every module
 follows.
+
+## Which backend runs where
+
+The two backends cover the same API, so the question is only which one is
+exercised. This is what the CI actually runs:
+
+| Architecture | `epoll` | `io_uring` |
+| --- | --- | --- |
+| `amd64` | tested | tested |
+| `arm64` | tested | tested |
+| `armv7` | tested | tested through a simulated io_uring-free kernel (* ) |
+| `ppc64le` | tested | tested through a simulated io_uring-free kernel (* ) |
+| `riscv64` | tested | tested through a simulated io_uring-free kernel (* ) |
+| `s390x` | tested | tested through a simulated io_uring-free kernel (* ) |
+
+(*) Those four run under QEMU user-mode emulation, which does not implement the
+`io_uring` syscalls: the kernel returns `ENOSYS` and the reactor falls back to
+`epoll`. The `io_uring` path is therefore exercised natively on `amd64` and
+`arm64`, and on the others through a simulated kernel without `io_uring`, which
+is exactly what those platforms see in CI.
+
+The `io_uring` code itself is architecture-independent: the ABI is the same
+everywhere, and what does differ per architecture — the size of the
+`sockaddr` structures, the alignment of the operations, and whether a 64-bit
+atomic is lock-free — is checked at compile time on every architecture in the
+matrix, with `static_assert`.
 
 ## The trade-offs
 

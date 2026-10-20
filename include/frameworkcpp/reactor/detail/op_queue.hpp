@@ -10,6 +10,12 @@
 
 namespace frameworkcpp::reactor::detail {
 
+// El ring de operaciones se actualiza desde cualquier hilo y sin locks: sus
+// indices tienen que ser atomicos lock-free. Si la plataforma no lo garantiza,
+// el hot path pagaria una lock que el framework no promete.
+static_assert(std::atomic<std::size_t>::is_always_lock_free,
+              "the operation ring needs lock-free size_t atomics");
+
 // Cola lock-free MPMC para ops. Los slots son punteros a op_t pre-reservados
 // en arena. Un productor (cualquier hilo) push; un consumidor (el hilo de la
 // queue) pop. Wait-free para un solo consumidor, lock-free para muchos

@@ -5,8 +5,10 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <sys/epoll.h>
 #include <thread>
 
+#include "frameworkcpp/reactor/detail/epoll_ring.hpp"
 #include "frameworkcpp/reactor/detail/io_uring_ring.hpp"
 #include "frameworkcpp/reactor/detail/op.hpp"
 #include "frameworkcpp/reactor/detail/op_queue.hpp"
@@ -22,7 +24,11 @@ namespace frameworkcpp::reactor::detail {
 struct socket_slot_t;
 
 struct queue_control_t {
+  // Backends de eventos. Solo uno está activo por queue.
   io_uring_ring_t ring_;
+  epoll_ring_t epoll_;
+  bool use_epoll_ = false;
+
   op_queue_t op_queue_;
   strand_t *strands_ = nullptr; // segmento propio de la queue
   std::size_t num_strands_ = 0;
@@ -31,8 +37,10 @@ struct queue_control_t {
   op_t *timers_segment_ = nullptr; // segmento propio de timers
   std::size_t timers_segment_size_ = 0;
   timer_wheel_t timers_;
+
   socket_slot_t *sockets_ = nullptr;
   std::size_t num_sockets_ = 0;
+
   std::atomic<bool> stop_{false};
   std::thread thread_;
   bool running_ = false;
@@ -42,12 +50,18 @@ struct socket_slot_t {
   int fd_ = -1;
   queue_t *queue_ = nullptr;
   std::uint64_t socket_id_ = 0;
-  // Dirección del emisor del último datagrama recibido.
-  sockaddr_storage peer_{};
-  socklen_t peer_len_ = 0;
   // Operaciones en vuelo para este socket. While it is not zero the socket
   // cannot be migrated to another queue.
   std::atomic<std::uint32_t> inflight_{0};
+  // Dirección del emisor del último datagrama recibido.
+  sockaddr_storage peer_{};
+  socklen_t peer_len_ = 0;
+  // Una operación pendiente por dirección. El backend de epoll necesita al
+  // máximo una por dirección porque el interest se registra por descriptor.
+  op_t *pending_read_ = nullptr;
+  op_t *pending_write_ = nullptr;
+  // Eventos registrados en epoll para este descriptor.
+  std::uint32_t interest_ = 0;
 }; // struct socket_slot_t
 
 struct reactor_state_t {
@@ -59,6 +73,7 @@ struct reactor_state_t {
   op_t **timer_heap_ = nullptr;
   socket_slot_t *sockets_ = nullptr;
   strand_t *strands_ = nullptr;
+  struct epoll_event *events_ = nullptr;
   std::size_t num_queues_ = 0;
   std::size_t num_sockets_ = 0;
   std::size_t num_strands_ = 0;

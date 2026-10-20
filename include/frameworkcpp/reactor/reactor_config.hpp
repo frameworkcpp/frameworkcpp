@@ -19,10 +19,21 @@ inline constexpr std::size_t max_reactor_sockets_k = 4096;
 inline constexpr std::size_t max_reactor_strands_k = 4096;
 
 // Número de specs que el reactor carvea del arena.
-inline constexpr std::size_t reactor_spec_count_k = 8;
+inline constexpr std::size_t reactor_spec_count_k = 9;
 
 // Tag del shard del reactor dentro de la arena.
 inline constexpr std::uint64_t reactor_shard_tag_k = 0x72656163746f72ULL; // "reactor"
+
+// Backend de eventos que usa el reactor.
+//
+// io_uring es el backend de performance: el kernel agrupa las syscalls y el
+// hot path no las paga. epoll es el backend portable: funciona en cualquier
+// Linux, incluidos los que no exponen io_uring (emulacion, kernels viejos).
+enum class backend_t : std::uint8_t {
+  auto_ = 0,     // io_uring si el kernel lo expone, si no epoll
+  io_uring_ = 1, // exigir io_uring: bind_arena falla si no esta
+  epoll_ = 2,    // exigir epoll
+}; // enum class backend_t
 
 struct reactor_config_t {
   std::size_t queues_ = 1;                // colas nombradas del reactor
@@ -32,10 +43,7 @@ struct reactor_config_t {
   std::size_t max_strands_ = max_reactor_strands_k;
   std::size_t max_timers_per_queue_ = 256; // timers vivos por queue
   bool affinity_ = false;                  // pinchar cada queue a su propio núcleo
-  bool enable_io_ = true;                  // usar io_uring. Si el kernel no lo
-                                           // expone, el reactor sigue vivo: los
-                                           // timers y los strands funcionan, y
-                                           // solo las operaciones de E/S fallan
+  backend_t backend_ = backend_t::auto_;   // backend de eventos
 }; // struct reactor_config_t
 
 namespace detail {

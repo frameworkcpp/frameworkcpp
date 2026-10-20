@@ -110,8 +110,6 @@ TEST(reactor_test_t, GetOrCreateIsIdempotentPerName) {
 }
 
 TEST(reactor_test_t, ReceivesOverIoUring) {
-  if (!io_uring_available())
-    GTEST_SKIP() << "io_uring is not available in this environment";
   int _fds[2] = {-1, -1};
   ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, _fds), 0);
 
@@ -149,8 +147,6 @@ TEST(reactor_test_t, ReceivesOverIoUring) {
 }
 
 TEST(reactor_test_t, SendsOverIoUring) {
-  if (!io_uring_available())
-    GTEST_SKIP() << "io_uring is not available in this environment";
   int _fds[2] = {-1, -1};
   ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, _fds), 0);
 
@@ -217,8 +213,6 @@ TEST(reactor_test_t, MigratesAnIdleSocketToAnotherQueue) {
 }
 
 TEST(reactor_test_t, RefusesToMigrateABusySocket) {
-  if (!io_uring_available())
-    GTEST_SKIP() << "io_uring is not available in this environment";
   int _fds[2] = {-1, -1};
   ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, _fds), 0);
 
@@ -416,8 +410,6 @@ void on_quick(void *ctx, const op_result_t &result) {
 
 // Un timer con strand no puede solaparse con otra operación del mismo strand.
 TEST(reactor_test_t, TimerWithStrandDoesNotOverlapTheStrand) {
-  if (!io_uring_available())
-    GTEST_SKIP() << "io_uring is not available in this environment";
   int _fds[2] = {-1, -1};
   ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, _fds), 0);
 
@@ -485,8 +477,6 @@ void on_udp_send(void *ctx, const op_result_t &result) {
 
 // Un servidor TCP completo: listen, accept y la conexión entrante.
 TEST(reactor_test_t, RunsATcpServerThatAcceptsAConnection) {
-  if (!io_uring_available())
-    GTEST_SKIP() << "io_uring is not available in this environment";
 
   auto _arena_config = make_arena_config(arena::round_to_page(precompute(make_reactor_config())));
   arena::arena_t _arena{_arena_config};
@@ -542,8 +532,6 @@ TEST(reactor_test_t, RunsATcpServerThatAcceptsAConnection) {
 
 // UDP: sendto a una dirección y recepción del datagrama.
 TEST(reactor_test_t, SendsAndReceivesAUnixDatagram) {
-  if (!io_uring_available())
-    GTEST_SKIP() << "io_uring is not available in this environment";
 
   auto _arena_config = make_arena_config(arena::round_to_page(precompute(make_reactor_config())));
   arena::arena_t _arena{_arena_config};
@@ -608,8 +596,6 @@ TEST(reactor_test_t, SendsAndReceivesAUnixDatagram) {
 
 // ICMP necesita privilegios: si el sistema no los concede, no es un fallo.
 TEST(reactor_test_t, OpensAnIcmpSocketWhenPrivilegesAllow) {
-  if (!io_uring_available())
-    GTEST_SKIP() << "io_uring is not available in this environment";
   auto _arena_config = make_arena_config(arena::round_to_page(precompute(make_reactor_config())));
   arena::arena_t _arena{_arena_config};
   reactor_t _reactor;
@@ -637,8 +623,6 @@ void on_connect(void *ctx, const op_result_t &result) {
 
 // Un cliente TCP: connect asíncrono y lectura de la respuesta.
 TEST(reactor_test_t, ConnectsToATcpServer) {
-  if (!io_uring_available())
-    GTEST_SKIP() << "io_uring is not available in this environment";
 
   auto _arena_config = make_arena_config(arena::round_to_page(precompute(make_reactor_config())));
   arena::arena_t _arena{_arena_config};
@@ -675,8 +659,6 @@ TEST(reactor_test_t, ConnectsToATcpServer) {
 
 // Un servidor Unix domain acepta conexiones.
 TEST(reactor_test_t, RunsAUnixDomainServerThatAcceptsAConnection) {
-  if (!io_uring_available())
-    GTEST_SKIP() << "io_uring is not available in this environment";
 
   const char *_path_k = "/tmp/frameworkcpp_unix_test.sock";
   ::unlink(_path_k);
@@ -725,7 +707,7 @@ TEST(reactor_test_t, DegradesWithoutIoUringAndStillRunsTimers) {
   // el resto del mecanismo siguen funcionando. Es lo que permite probar el
   // modulo en plataformas donde el kernel no expone io_uring.
   reactor_config_t _config = make_reactor_config();
-  _config.enable_io_ = false;
+  _config.backend_ = backend_t::epoll_;
 
   auto _arena_config = make_arena_config(arena::round_to_page(precompute(_config)));
   arena::arena_t _arena{_arena_config};
@@ -752,16 +734,19 @@ TEST(reactor_test_t, DegradesWithoutIoUringAndStillRunsTimers) {
   EXPECT_TRUE(_context.fired_.load(std::memory_order_acquire));
 }
 
-TEST(reactor_test_t, ReportsEnosysForIoWithoutIoUring) {
+TEST(reactor_test_t, EpollBackendServesIoWithoutIoUring) {
+  // Con el backend epoll forzado, la E/S funciona aunque el kernel no
+  // exponga io_uring. Es el camino que se usa en las arquitecturas emuladas.
   reactor_config_t _config = make_reactor_config();
-  _config.enable_io_ = false;
+  _config.backend_ = backend_t::epoll_;
 
   auto _arena_config = make_arena_config(arena::round_to_page(precompute(_config)));
   arena::arena_t _arena{_arena_config};
   reactor_t _reactor;
   ASSERT_TRUE(_reactor.bind_arena(_arena, _config));
+  EXPECT_EQ(_reactor.get_backend(), backend_t::epoll_);
 
-  auto *_queue = _reactor.get_or_create("degraded");
+  auto *_queue = _reactor.get_or_create("epoll");
   int _fds[2] = {-1, -1};
   ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, _fds), 0);
   auto _socket = _reactor.create_socket(_fds[0], _queue);
@@ -771,6 +756,7 @@ TEST(reactor_test_t, ReportsEnosysForIoWithoutIoUring) {
   ASSERT_TRUE(_socket.recv(_context.data_, sizeof(_context.data_), on_recv, &_context));
 
   _reactor.run_all();
+  ASSERT_EQ(::write(_fds[1], "hola", 4), 4);
 
   const auto _deadline_k = std::chrono::steady_clock::now() + std::chrono::seconds(5);
   while (!_context.done_.load(std::memory_order_acquire) &&
@@ -779,12 +765,45 @@ TEST(reactor_test_t, ReportsEnosysForIoWithoutIoUring) {
   }
   _reactor.stop_all();
 
-  // La operacion de E/S no se puede ejecutar y lo dice.
+  // La operacion de E/S se sirvio: no hay ENOSYS.
   EXPECT_TRUE(_context.done_.load(std::memory_order_acquire));
-  EXPECT_EQ(_context.ec_.load(std::memory_order_acquire), ENOSYS);
+  EXPECT_EQ(_context.ec_.load(std::memory_order_acquire), 0);
+  EXPECT_EQ(_context.bytes_.load(std::memory_order_acquire), 4U);
+  EXPECT_EQ(std::string(_context.data_, 4), "hola");
 
   ::close(_fds[0]);
   ::close(_fds[1]);
+}
+
+TEST(reactor_test_t, ForcedIoUringBackendFailsWhenTheKernelHasNone) {
+  // Pedir io_uring explicitamente es estricto: si el kernel no lo expone,
+  // bind_arena falla en vez de caer a otro backend.
+  reactor_config_t _config = make_reactor_config();
+  _config.backend_ = backend_t::io_uring_;
+
+  auto _arena_config = make_arena_config(arena::round_to_page(precompute(_config)));
+  arena::arena_t _arena{_arena_config};
+  reactor_t _reactor;
+  const bool _bound_k = _reactor.bind_arena(_arena, _config);
+
+  if (io_uring_available()) {
+    ASSERT_TRUE(_bound_k);
+    EXPECT_EQ(_reactor.get_backend(), backend_t::io_uring_);
+  } else {
+    EXPECT_FALSE(_bound_k);
+  }
+}
+
+TEST(reactor_test_t, AutoBackendPicksIoUringWhenAvailable) {
+  const reactor_config_t _config_k = make_reactor_config();
+
+  auto _arena_config = make_arena_config(arena::round_to_page(precompute(_config_k)));
+  arena::arena_t _arena{_arena_config};
+  reactor_t _reactor;
+  ASSERT_TRUE(_reactor.bind_arena(_arena, _config_k));
+
+  const backend_t _expected_k = io_uring_available() ? backend_t::io_uring_ : backend_t::epoll_;
+  EXPECT_EQ(_reactor.get_backend(), _expected_k);
 }
 
 } // namespace

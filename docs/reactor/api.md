@@ -242,6 +242,16 @@ received, or null when it has not received one. It is only meaningful for a
 socket with one pending receive, which is the usual shape of a datagram
 server.
 
+## get_backend
+
+```cpp
+[[nodiscard]] backend_t get_backend() const noexcept;
+```
+
+Which event backend the reactor ended up using. With `backend_t::auto_` in the
+configuration this tells you whether the kernel offered `io_uring` or whether
+the reactor fell back to `epoll` — useful to know before you read a timing.
+
 ## get_socket_count
 
 ```cpp
@@ -333,6 +343,9 @@ struct op_result_t {
 - **No dynamic allocation.** After `bind_arena`, no path allocates. That
   includes the operation pool: when it runs dry, `post` returns `false`.
 - **No blocking `post`.** A full pool is reported, not waited on.
+- **One operation per direction.** A socket can have one outstanding read and
+  one outstanding write. A second read on the same socket completes with
+  `EALREADY` instead of piling up.
 - **Migration needs an idle socket.** A socket with an operation in flight
   cannot move, because the queue that will complete that operation has to be
   the one that owns the connection.
