@@ -171,10 +171,24 @@ that serialises a strand never needs to be a cross-thread atomic.
 When a socket migrates, its strand moves with it: the strand id is interpreted
 in the target queue's segment from that moment on.
 
+## The timer heap
+
+Each queue owns a segment of the timer pool and a binary heap over it. A
+timer is an `op_t` with a deadline instead of a descriptor, so firing it is
+the same code path as completing any other operation.
+
+The heap is over pointers to ops that live in the arena, so inserting a timer
+costs no allocation. Each op remembers its position in the heap, which makes
+cancelling a timer by id a removal rather than a scan.
+
+The queue's loop reads the nearest deadline before it waits, and sleeps exactly
+until then (capped at a millisecond so a stop request is noticed promptly).
+
+A timer with a strand does not run when it expires: it joins the strand's
+queue, so it cannot overlap the operation the strand is busy with.
+
 ## What is not implemented yet
 
-- **Timers.** `op_kind_t::timer_` completes immediately; there is no deadline
-  timer yet.
 - **UDP, ICMP and Unix sockets.** The `io_uring` operations exist in the
   vocabulary, but only TCP-style `accept`/`recv`/`send`/`connect` are wired up.
 - **Automatic rebalancing.** `rebalance()` is a call you make; the reactor does

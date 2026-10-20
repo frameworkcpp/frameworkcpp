@@ -11,6 +11,7 @@ struct reactor_config_t {
     std::size_t max_jobs_per_queue_ = 1024;  // operations in flight per queue
     std::size_t max_sockets_ = 4096;         // registered sockets
     std::size_t max_strands_ = 4096;         // serialisation keys
+    std::size_t max_timers_per_queue_ = 256; // pending timers per queue
     bool affinity_ = false;                  // pin each queue to its own core
 };
 ```
@@ -22,6 +23,7 @@ struct reactor_config_t {
 | `max_jobs_per_queue_` | Operations in flight per queue. | The operation pool. When it is empty, `post` returns `false`. |
 | `max_sockets_` | Registered sockets. | A socket table entry is small, but the table is fixed. |
 | `max_strands_` | Distinct strand keys. | Strands are addressed modulo this number. |
+| `max_timers_per_queue_` | Pending timers per queue. | A queue's timers live in their own pool, so a full timer pool never starves the I/O pool. |
 | `affinity_` | Whether queues are pinned to a core. | Queue *n* is pinned to CPU *n*. The pin is best-effort. |
 
 ## Sizing the arena

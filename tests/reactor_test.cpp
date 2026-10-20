@@ -291,5 +291,170 @@ TEST(reactor_test_t, AffinityPinsEachQueueToItsOwnCore) {
   _reactor.stop_all();
 }
 
+struct timer_context_t {
+  std::atomic<bool> fired_{false};
+  std::atomic<std::uint64_t> fired_at_ns_{0};
+}; // struct timer_context_t
+
+void on_timer(void *ctx, const op_result_t &result) {
+  auto *_context = static_cast<timer_context_t *>(ctx);
+  _context->fired_at_ns_.store(monotonic_now_ns(), std::memory_order_release);
+  _context->fired_.store(true, std::memory_order_release);
+  (void) result;
+}
+
+TEST(reactor_test_t, TimerFiresAfterItsDeadline) {
+  if (!io_uring_available())
+    GTEST_SKIP() << "io_uring is not available in this environment";
+  auto _arena_config = make_arena_config(arena::round_to_page(precompute(make_reactor_config())));
+  arena::arena_t _arena{_arena_config};
+  reactor_t _reactor;
+  ASSERT_TRUE(_reactor.bind_arena(_arena, make_reactor_config()));
+
+  auto *_queue = _reactor.get_or_create("timers");
+  ASSERT_NE(_queue, nullptr);
+
+  timer_context_t _context;
+  const std::uint64_t _id_k = _reactor.schedule_timer(_queue, 50000000ULL, on_timer, &_context);
+  ASSERT_NE(_id_k, 0U);
+  EXPECT_EQ(_reactor.get_timer_count(_queue), 1U);
+
+  _reactor.run_all();
+
+  const auto _deadline_k = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (!_context.fired_.load(std::memory_order_acquire) &&
+         std::chrono::steady_clock::now() < _deadline_k) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  _reactor.stop_all();
+
+  EXPECT_TRUE(_context.fired_.load(std::memory_order_acquire));
+  EXPECT_EQ(_reactor.get_timer_count(_queue), 0U);
+}
+
+TEST(reactor_test_t, CancelsATimerBeforeItFires) {
+  if (!io_uring_available())
+    GTEST_SKIP() << "io_uring is not available in this environment";
+  auto _arena_config = make_arena_config(arena::round_to_page(precompute(make_reactor_config())));
+  arena::arena_t _arena{_arena_config};
+  reactor_t _reactor;
+  ASSERT_TRUE(_reactor.bind_arena(_arena, make_reactor_config()));
+
+  auto *_queue = _reactor.get_or_create("timers");
+  timer_context_t _context;
+  const std::uint64_t _id_k = _reactor.schedule_timer(_queue, 50000000ULL, on_timer, &_context);
+  ASSERT_NE(_id_k, 0U);
+  EXPECT_TRUE(_reactor.cancel_timer(_queue, _id_k));
+  EXPECT_EQ(_reactor.get_timer_count(_queue), 0U);
+
+  // Cancelar dos veces no tiene efecto: el timer ya no existe.
+  EXPECT_FALSE(_reactor.cancel_timer(_queue, _id_k));
+
+  _reactor.run_all();
+  std::this_thread::sleep_for(std::chrono::milliseconds(150));
+  _reactor.stop_all();
+
+  EXPECT_FALSE(_context.fired_.load(std::memory_order_acquire));
+}
+
+TEST(reactor_test_t, FiresTimersInDeadlineOrder) {
+  if (!io_uring_available())
+    GTEST_SKIP() << "io_uring is not available in this environment";
+  auto _arena_config = make_arena_config(arena::round_to_page(precompute(make_reactor_config())));
+  arena::arena_t _arena{_arena_config};
+  reactor_t _reactor;
+  ASSERT_TRUE(_reactor.bind_arena(_arena, make_reactor_config()));
+
+  auto *_queue = _reactor.get_or_create("timers");
+  timer_context_t _first;
+  timer_context_t _second;
+  // Se insertan al revés: el heap tiene que entregarlos por deadline.
+  const std::uint64_t _second_id_k =
+      _reactor.schedule_timer(_queue, 60000000ULL, on_timer, &_second);
+  const std::uint64_t _first_id_k = _reactor.schedule_timer(_queue, 20000000ULL, on_timer, &_first);
+  ASSERT_NE(_second_id_k, 0U);
+  ASSERT_NE(_first_id_k, 0U);
+
+  _reactor.run_all();
+
+  const auto _deadline_k = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (!_second.fired_.load(std::memory_order_acquire) &&
+         std::chrono::steady_clock::now() < _deadline_k) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  _reactor.stop_all();
+
+  EXPECT_TRUE(_first.fired_.load(std::memory_order_acquire));
+  EXPECT_TRUE(_second.fired_.load(std::memory_order_acquire));
+  EXPECT_LE(_first.fired_at_ns_.load(std::memory_order_acquire),
+            _second.fired_at_ns_.load(std::memory_order_acquire));
+}
+
+struct strand_order_t {
+  std::atomic<int> counter_{0};
+  std::atomic<int> max_concurrent_{0};
+  std::atomic<int> current_{0};
+  std::atomic<bool> slow_done_{false};
+}; // struct strand_order_t
+
+void on_slow(void *ctx, const op_result_t &result) {
+  auto *_state = static_cast<strand_order_t *>(ctx);
+  (void) result;
+  const int _inside_k = _state->current_.fetch_add(1) + 1;
+  int _seen = _state->max_concurrent_.load();
+  while (_inside_k > _seen && !_state->max_concurrent_.compare_exchange_weak(_seen, _inside_k)) {
+  }
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  _state->current_.fetch_sub(1);
+  _state->counter_.fetch_add(1);
+  _state->slow_done_.store(true, std::memory_order_release);
+}
+
+void on_quick(void *ctx, const op_result_t &result) {
+  auto *_state = static_cast<strand_order_t *>(ctx);
+  (void) result;
+  _state->counter_.fetch_add(1);
+}
+
+// Un timer con strand no puede solaparse con otra operación del mismo strand.
+TEST(reactor_test_t, TimerWithStrandDoesNotOverlapTheStrand) {
+  if (!io_uring_available())
+    GTEST_SKIP() << "io_uring is not available in this environment";
+  int _fds[2] = {-1, -1};
+  ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, _fds), 0);
+
+  auto _arena_config = make_arena_config(arena::round_to_page(precompute(make_reactor_config())));
+  arena::arena_t _arena{_arena_config};
+  reactor_t _reactor;
+  ASSERT_TRUE(_reactor.bind_arena(_arena, make_reactor_config()));
+
+  auto *_queue = _reactor.get_or_create("strands");
+  auto _socket = _reactor.create_socket(_fds[0], _queue);
+  ASSERT_TRUE(_socket);
+
+  strand_order_t _state;
+  const std::uint64_t _strand_k = 42;
+
+  // Una operación lenta en vuelo con el strand...
+  recv_context_t _context;
+  ASSERT_TRUE(_socket.recv(_context.data_, sizeof(_context.data_), on_slow, &_state, _strand_k));
+
+  // ...y un timer del mismo strand: no puede ejecutarse hasta que la primera
+  // termine.
+  const std::uint64_t _timer_k =
+      _reactor.schedule_timer(_queue, 10000000ULL, on_quick, &_state, _strand_k);
+  ASSERT_NE(_timer_k, 0U);
+
+  _reactor.run_all();
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  _reactor.stop_all();
+
+  // Nunca hubo dos operaciones del strand a la vez.
+  EXPECT_LE(_state.max_concurrent_.load(), 1);
+
+  ::close(_fds[0]);
+  ::close(_fds[1]);
+}
+
 } // namespace
 } // namespace frameworkcpp::reactor

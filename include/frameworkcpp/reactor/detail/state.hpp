@@ -11,6 +11,7 @@
 #include "frameworkcpp/reactor/detail/op.hpp"
 #include "frameworkcpp/reactor/detail/op_queue.hpp"
 #include "frameworkcpp/reactor/detail/strand.hpp"
+#include "frameworkcpp/reactor/detail/timer_wheel.hpp"
 
 namespace frameworkcpp::reactor {
 class queue_t;
@@ -24,9 +25,12 @@ struct queue_control_t {
   io_uring_ring_t ring_;
   op_queue_t op_queue_;
   strand_t *strands_ = nullptr; // segmento propio de la queue
-  std::size_t num_strands_ = 0; // tamaño del segmento
+  std::size_t num_strands_ = 0;
   op_t *ops_segment_ = nullptr; // segmento propio de operaciones
   std::size_t ops_segment_size_ = 0;
+  op_t *timers_segment_ = nullptr; // segmento propio de timers
+  std::size_t timers_segment_size_ = 0;
+  timer_wheel_t timers_;
   socket_slot_t *sockets_ = nullptr;
   std::size_t num_sockets_ = 0;
   std::atomic<bool> stop_{false};
@@ -48,11 +52,14 @@ struct reactor_state_t {
   queue_t *queue_handles_ = nullptr;
   op_t *ops_ = nullptr;
   op_t **op_ring_ = nullptr;
+  op_t *timers_ = nullptr;
+  op_t **timer_heap_ = nullptr;
   socket_slot_t *sockets_ = nullptr;
   strand_t *strands_ = nullptr;
   std::size_t num_queues_ = 0;
   std::size_t num_sockets_ = 0;
   std::size_t num_strands_ = 0;
+  std::size_t num_timers_ = 0;
   std::atomic<bool> running_{false};
 }; // struct reactor_state_t
 

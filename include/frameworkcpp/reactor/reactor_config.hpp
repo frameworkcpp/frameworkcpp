@@ -19,7 +19,7 @@ inline constexpr std::size_t max_reactor_sockets_k = 4096;
 inline constexpr std::size_t max_reactor_strands_k = 4096;
 
 // Número de specs que el reactor carvea del arena.
-inline constexpr std::size_t reactor_spec_count_k = 6;
+inline constexpr std::size_t reactor_spec_count_k = 8;
 
 // Tag del shard del reactor dentro de la arena.
 inline constexpr std::uint64_t reactor_shard_tag_k = 0x72656163746f72ULL; // "reactor"
@@ -30,7 +30,8 @@ struct reactor_config_t {
   std::size_t max_jobs_per_queue_ = 1024; // ops en cola por queue (punteros pre-reservados)
   std::size_t max_sockets_ = max_reactor_sockets_k;
   std::size_t max_strands_ = max_reactor_strands_k;
-  bool affinity_ = false; // pinchar cada queue a su propio núcleo
+  std::size_t max_timers_per_queue_ = 256; // timers vivos por queue
+  bool affinity_ = false;                  // pinchar cada queue a su propio núcleo
 }; // struct reactor_config_t
 
 namespace detail {

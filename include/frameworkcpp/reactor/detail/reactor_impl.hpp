@@ -18,6 +18,7 @@
 #include "frameworkcpp/reactor/detail/op.hpp"
 #include "frameworkcpp/reactor/detail/op_queue.hpp"
 #include "frameworkcpp/reactor/detail/strand.hpp"
+#include "frameworkcpp/reactor/detail/timer_wheel.hpp"
 
 namespace frameworkcpp::reactor::detail {
 
@@ -51,6 +52,7 @@ inline bool reactor_t::bind_arena(arena::arena_t &arena, const reactor_config_t 
 
   const std::size_t _total_ops_k = config.queues_ * config.max_jobs_per_queue_;
   const std::size_t _total_strands_k = config.queues_ * config.max_strands_;
+  const std::size_t _total_timers_k = config.queues_ * config.max_timers_per_queue_;
 
   arena::arena_shard_t _shard{};
   try {
@@ -78,8 +80,14 @@ inline bool reactor_t::bind_arena(arena::arena_t &arena, const reactor_config_t 
                                               sizeof(detail::strand_t) * _total_strands_k,
                                               alignof(detail::strand_t));
 
+  auto *_timers_raw = _shard.allocate_tagged(
+      reactor_shard_tag_k + 6, sizeof(detail::op_t) * _total_timers_k, alignof(detail::op_t));
+  auto *_timer_heap_raw = _shard.allocate_tagged(
+      reactor_shard_tag_k + 7, sizeof(detail::op_t *) * _total_timers_k, alignof(detail::op_t *));
+
   if (_queues_raw == nullptr || _handles_raw == nullptr || _ops_raw == nullptr ||
-      _ring_raw == nullptr || _sockets_raw == nullptr || _strands_raw == nullptr)
+      _ring_raw == nullptr || _sockets_raw == nullptr || _strands_raw == nullptr ||
+      _timers_raw == nullptr || _timer_heap_raw == nullptr)
     return false;
 
   state_.queues_ = reinterpret_cast<detail::queue_control_t *>(_queues_raw);
@@ -88,12 +96,20 @@ inline bool reactor_t::bind_arena(arena::arena_t &arena, const reactor_config_t 
   state_.op_ring_ = reinterpret_cast<detail::op_t **>(_ring_raw);
   state_.sockets_ = reinterpret_cast<detail::socket_slot_t *>(_sockets_raw);
   state_.strands_ = reinterpret_cast<detail::strand_t *>(_strands_raw);
+  state_.timers_ = reinterpret_cast<detail::op_t *>(_timers_raw);
+  state_.timer_heap_ = reinterpret_cast<detail::op_t **>(_timer_heap_raw);
   state_.num_queues_ = config.queues_;
   state_.num_sockets_ = config.max_sockets_;
   state_.num_strands_ = config.max_strands_;
+  state_.num_timers_ = config.max_timers_per_queue_;
 
   for (std::size_t _index = 0; _index < _total_strands_k; ++_index)
     new (static_cast<void *>(&state_.strands_[_index])) detail::strand_t();
+
+  for (std::size_t _index = 0; _index < _total_timers_k; ++_index) {
+    new (static_cast<void *>(&state_.timers_[_index])) detail::op_t();
+    state_.timers_[_index].done_ = true; // libre desde el arranque
+  }
 
   for (std::size_t _index = 0; _index < config.max_sockets_; ++_index) {
     new (static_cast<void *>(&state_.sockets_[_index])) detail::socket_slot_t();
@@ -117,6 +133,10 @@ inline bool reactor_t::bind_arena(arena::arena_t &arena, const reactor_config_t 
     state_.queues_[_index].num_sockets_ = config.max_sockets_;
     state_.queues_[_index].ops_segment_ = &state_.ops_[_index * config.max_jobs_per_queue_];
     state_.queues_[_index].ops_segment_size_ = config.max_jobs_per_queue_;
+    state_.queues_[_index].timers_segment_ = &state_.timers_[_index * config.max_timers_per_queue_];
+    state_.queues_[_index].timers_segment_size_ = config.max_timers_per_queue_;
+    state_.queues_[_index].timers_.init(&state_.timer_heap_[_index * config.max_timers_per_queue_],
+                                        config.max_timers_per_queue_);
 
     new (static_cast<void *>(&state_.queue_handles_[_index])) queue_t();
     state_.queue_handles_[_index].control_ = &state_.queues_[_index];
@@ -174,6 +194,85 @@ inline void reactor_t::release_socket(detail::queue_control_t *qc,
   if (socket_id == 0 || socket_id > qc->num_sockets_)
     return;
   qc->sockets_[socket_id - 1].inflight_.fetch_sub(1, std::memory_order_release);
+}
+
+// Reloj monotónico en nanosegundos. Es la base de todos los deadlines.
+inline std::uint64_t monotonic_now_ns() noexcept {
+  struct timespec _ts {};
+  ::clock_gettime(CLOCK_MONOTONIC, &_ts);
+  return (static_cast<std::uint64_t>(_ts.tv_sec) * 1000000000ULL) +
+         static_cast<std::uint64_t>(_ts.tv_nsec);
+}
+
+inline std::uint64_t reactor_t::schedule_timer(queue_t *queue,
+                                               std::uint64_t delay_ns,
+                                               reactor_fn_t fn,
+                                               void *ctx,
+                                               std::uint64_t strand_id) noexcept {
+  if (!bound_ || queue == nullptr || queue->control_ == nullptr)
+    return 0;
+  detail::queue_control_t *_qc = queue->control_;
+
+  // Un op libre del segmento de timers de esta queue.
+  detail::op_t *_op = nullptr;
+  for (std::size_t _index = 0; _index < _qc->timers_segment_size_; ++_index) {
+    if (_qc->timers_segment_[_index].done_) {
+      _op = &_qc->timers_segment_[_index];
+      break;
+    }
+  }
+  if (_op == nullptr)
+    return 0;
+
+  const std::uint64_t _id_k = this->next_timer_id();
+  _op->kind_ = op_kind_t::timer_;
+  _op->fd_ = -1;
+  _op->buffer_ = nullptr;
+  _op->len_ = 0;
+  _op->fn_ = fn;
+  _op->ctx_ = ctx;
+  _op->strand_id_ = strand_id;
+  _op->socket_id_ = 0;
+  _op->priority_ = 0;
+  _op->result_ = op_result_t{};
+  _op->next_ = nullptr;
+  _op->timer_id_ = _id_k;
+  _op->deadline_ns_ = monotonic_now_ns() + delay_ns;
+  _op->done_ = false;
+  _op->heap_index_ = 0;
+
+  if (!_qc->timers_.insert(_op)) {
+    _op->done_ = true;
+    return 0;
+  }
+  return _id_k;
+}
+
+inline bool reactor_t::cancel_timer(queue_t *queue, std::uint64_t timer_id) const noexcept {
+  if (!bound_ || queue == nullptr || queue->control_ == nullptr || timer_id == 0)
+    return false;
+  detail::queue_control_t *_qc = queue->control_;
+  for (std::size_t _index = 0; _index < _qc->timers_segment_size_; ++_index) {
+    detail::op_t *_op = &_qc->timers_segment_[_index];
+    if (_op->done_ || _op->timer_id_ != timer_id)
+      continue;
+    if (_qc->timers_.remove(_op)) {
+      _op->done_ = true;
+      _op->timer_id_ = 0;
+      return true;
+    }
+  }
+  return false;
+}
+
+inline std::size_t reactor_t::get_timer_count(queue_t *queue) const noexcept {
+  if (!bound_ || queue == nullptr || queue->control_ == nullptr)
+    return 0;
+  return queue->control_->timers_.size();
+}
+
+inline std::uint64_t reactor_t::next_timer_id() noexcept {
+  return timer_id_.fetch_add(1, std::memory_order_relaxed);
 }
 
 inline bool reactor_t::migrate(socket_t &socket, queue_t *target) noexcept {
@@ -263,6 +362,34 @@ inline void reactor_t::run_all() noexcept {
   }
 }
 
+inline void reactor_t::expire_timers(detail::queue_control_t *qc) noexcept {
+  const std::uint64_t _now_k = monotonic_now_ns();
+  for (;;) {
+    detail::op_t *_op = qc->timers_.pop();
+    if (_op == nullptr)
+      return;
+    if (_op->deadline_ns_ > _now_k) {
+      // Todavía no vence: vuelve al heap.
+      (void) qc->timers_.insert(_op);
+      return;
+    }
+    if (_op->strand_id_ != 0) {
+      // Un timer con strand no puede ejecutarse mientras haya otra op del
+      // mismo strand en vuelo: entra en la cola del strand y lo despacha el
+      // propio hilo de la queue, igual que cualquier otra operación.
+      const auto _strand_index_k = static_cast<std::size_t>(_op->strand_id_ % qc->num_strands_);
+      qc->strands_[_strand_index_k].enqueue(_op);
+      continue;
+    }
+    _op->result_.ec_ = 0;
+    _op->result_.bytes_ = 0;
+    if (_op->fn_ != nullptr)
+      _op->fn_(_op->ctx_, _op->result_);
+    _op->done_ = true;
+    _op->timer_id_ = 0;
+  }
+}
+
 inline void reactor_t::run_queue(std::size_t index) const noexcept {
   auto *_qc = &this->state_.queues_[index];
   if (affinity_)
@@ -287,9 +414,24 @@ inline void reactor_t::run_queue(std::size_t index) const noexcept {
       continue;
     }
 
-    // 3. Esperar completaciones. El timeout permite revisar el flag de stop.
+    // 3. Expirar los timers vencidos.
+    reactor_t::expire_timers(_qc);
+
+    // 4. Esperar completaciones. El timeout permite revisar el flag de stop y
+    //    despertar a tiempo para el siguiente deadline.
+    long _timeout_ns = 1000000L;
+    const std::uint64_t _next_k = _qc->timers_.next_deadline();
+    if (_next_k != 0) {
+      const std::uint64_t _now_k = monotonic_now_ns();
+      if (_next_k > _now_k) {
+        const std::uint64_t _delta_k = _next_k - _now_k;
+        _timeout_ns = (_delta_k < 1000000ULL) ? static_cast<long>(_delta_k) : 1000000L;
+      } else {
+        _timeout_ns = 0;
+      }
+    }
     struct io_uring_cqe *_cqe = nullptr;
-    if (_qc->ring_.wait_cqe(&_cqe, 1000000L))
+    if (_qc->ring_.wait_cqe(&_cqe, _timeout_ns))
       reactor_t::complete_op(_qc, _cqe);
   }
   _qc->running_ = false;

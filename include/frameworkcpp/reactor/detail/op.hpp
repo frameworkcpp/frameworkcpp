@@ -20,7 +20,10 @@ struct op_t {
   reactor_fn_t fn_ = nullptr;
   void *ctx_ = nullptr;
   std::uint64_t strand_id_ = 0;
-  std::uint64_t socket_id_ = 0; // socket dueño de la op (0 = ninguna)
+  std::uint64_t socket_id_ = 0;   // socket dueño de la op (0 = ninguna)
+  std::uint64_t timer_id_ = 0;    // id del timer (0 = no es un timer)
+  std::uint64_t deadline_ns_ = 0; // deadline absoluto del timer
+  std::size_t heap_index_ = 0;    // posición en el heap de timers
   int priority_ = 0;
   op_result_t result_{};
   bool done_ = false;

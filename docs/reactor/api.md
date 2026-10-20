@@ -27,6 +27,12 @@ class reactor_t {
     queue_t *get_or_create(std::string_view name) const noexcept;
     socket_t create_socket(int fd, queue_t *queue) const noexcept;
 
+    std::uint64_t schedule_timer(queue_t *queue, std::uint64_t delay_ns,
+                                  reactor_fn_t fn, void *ctx,
+                                  std::uint64_t strand_id = 0) noexcept;
+    bool cancel_timer(queue_t *queue, std::uint64_t timer_id) const noexcept;
+    [[nodiscard]] std::size_t get_timer_count(queue_t *queue) const noexcept;
+
     bool migrate(socket_t &socket, queue_t *target) noexcept;
     [[nodiscard]] std::size_t rebalance() const noexcept;
     [[nodiscard]] std::size_t get_socket_count(queue_t *queue) const noexcept;
@@ -95,6 +101,45 @@ descriptor: closing it is your job, or call `socket_t::close()`.
   or the socket table is full.
 - The socket is not registered with the kernel here. You post the operations;
   the first `accept`, `recv` or `connect` is what arms the `io_uring` ring.
+
+## schedule_timer
+
+```cpp
+std::uint64_t schedule_timer(queue_t *queue, std::uint64_t delay_ns,
+                              reactor_fn_t fn, void *ctx,
+                              std::uint64_t strand_id = 0) noexcept;
+```
+
+Schedules a timer that fires `delay_ns` nanoseconds from now. The handler runs
+in the queue's thread, like any other operation.
+
+- Returns a timer id (greater than zero) that you can pass to `cancel_timer`,
+  or 0 when the queue has no free timer slot.
+- The delay is measured against `monotonic_now_ns()`, so it is immune to wall
+  clock changes.
+- With a `strand_id`, the timer is serialised against the other operations of
+  that strand: it does not run while one of them is in flight.
+
+```cpp
+const std::uint64_t id = reactor.schedule_timer(queue, 100000000ULL, on_tick, &state);
+```
+
+## cancel_timer
+
+```cpp
+bool cancel_timer(queue_t *queue, std::uint64_t timer_id) const noexcept;
+```
+
+Cancels a timer before it fires. Returns true when the timer was still
+alive. Cancelling twice is harmless: the second call returns false.
+
+## get_timer_count
+
+```cpp
+[[nodiscard]] std::size_t get_timer_count(queue_t *queue) const noexcept;
+```
+
+How many timers are still pending in a queue.
 
 ## migrate
 
@@ -227,8 +272,6 @@ struct op_result_t {
 - **No dynamic allocation.** After `bind_arena`, no path allocates. That
   includes the operation pool: when it runs dry, `post` returns `false`.
 - **No blocking `post`.** A full pool is reported, not waited on.
-- **No timers yet.** `op_kind_t::timer_` exists in the vocabulary but completes
-  immediately; a real deadline timer is not implemented.
 - **Migration needs an idle socket.** A socket with an operation in flight
   cannot move, because the queue that will complete that operation has to be
   the one that owns the connection.

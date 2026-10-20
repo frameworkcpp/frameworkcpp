@@ -24,6 +24,10 @@ constexpr std::size_t precompute(const reactor_config_t &config) noexcept;
 // reactor cannot run there. Check it once at startup.
 [[nodiscard]] bool io_uring_available() noexcept;
 
+// Reloj monotónico en nanosegundos. Es la base de todos los deadlines del
+// reactor: comparar contra él es la forma de saber si un timer ya venció.
+[[nodiscard]] std::uint64_t monotonic_now_ns() noexcept;
+
 // Cola nombrada de eventos. Cada queue tiene su io_uring y su hilo de eventos.
 class queue_t {
   friend class reactor_t;
@@ -170,6 +174,23 @@ class reactor_t {
   // Conexiones registradas por queue. Sirve para observar el reparto.
   [[nodiscard]] std::size_t get_socket_count(queue_t *queue) const noexcept;
 
+  // Programa un timer que se dispara dentro de `delay_ns` nanosegundos. El
+  // handler corre en el hilo de la queue, como cualquier otra operación.
+  //
+  // Devuelve un id (> 0) para poder cancelarlo, o 0 si la queue no tiene
+  // timers libres.
+  std::uint64_t schedule_timer(queue_t *queue,
+                               std::uint64_t delay_ns,
+                               reactor_fn_t fn,
+                               void *ctx,
+                               std::uint64_t strand_id = 0) noexcept;
+
+  // Cancela un timer antes de que se dispare. Devuelve true si estaba vivo.
+  bool cancel_timer(queue_t *queue, std::uint64_t timer_id) const noexcept;
+
+  // Timers vivos en una queue.
+  [[nodiscard]] std::size_t get_timer_count(queue_t *queue) const noexcept;
+
   // Ejecuta los loops de todas las queues (bloqueante).
   void run_all() noexcept;
 
@@ -184,9 +205,12 @@ class reactor_t {
   static void execute_op(detail::queue_control_t *qc, detail::op_t *op) noexcept;
   static void complete_op(detail::queue_control_t *qc, struct io_uring_cqe *cqe) noexcept;
   static void release_socket(detail::queue_control_t *qc, std::uint64_t socket_id) noexcept;
+  static void expire_timers(detail::queue_control_t *qc) noexcept;
   void run_queue(std::size_t index) const noexcept;
+  std::uint64_t next_timer_id() noexcept;
 
   detail::reactor_state_t state_{};
+  std::atomic<std::uint64_t> timer_id_{1};
   bool bound_ = false;
   bool affinity_ = false;
 }; // class reactor_t
@@ -205,6 +229,7 @@ constexpr void make_specs(const reactor_config_t &config,
                           arena::object_spec_t (&specs)[reactor_spec_count_k]) {
   const std::size_t _total_ops_k = config.queues_ * config.max_jobs_per_queue_;
   const std::size_t _total_strands_k = config.queues_ * config.max_strands_;
+  const std::size_t _total_timers_k = config.queues_ * config.max_timers_per_queue_;
   specs[0] = {reactor_shard_tag_k,
               sizeof(detail::queue_control_t) * config.queues_,
               alignof(detail::queue_control_t),
@@ -221,6 +246,12 @@ constexpr void make_specs(const reactor_config_t &config,
   specs[5] = {reactor_shard_tag_k + 5,
               sizeof(detail::strand_t) * _total_strands_k,
               alignof(detail::strand_t),
+              1};
+  specs[6] = {
+      reactor_shard_tag_k + 6, sizeof(detail::op_t) * _total_timers_k, alignof(detail::op_t), 1};
+  specs[7] = {reactor_shard_tag_k + 7,
+              sizeof(detail::op_t *) * _total_timers_k,
+              alignof(detail::op_t *),
               1};
 }
 
