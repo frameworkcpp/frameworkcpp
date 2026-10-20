@@ -32,6 +32,10 @@ struct reactor_config_t {
   std::size_t max_strands_ = max_reactor_strands_k;
   std::size_t max_timers_per_queue_ = 256; // timers vivos por queue
   bool affinity_ = false;                  // pinchar cada queue a su propio núcleo
+  bool enable_io_ = true;                  // usar io_uring. Si el kernel no lo
+                                           // expone, el reactor sigue vivo: los
+                                           // timers y los strands funcionan, y
+                                           // solo las operaciones de E/S fallan
 }; // struct reactor_config_t
 
 namespace detail {

@@ -8,6 +8,7 @@
 #include <thread>
 
 #include <arpa/inet.h>
+#include <cerrno>
 #include <gtest/gtest.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -67,6 +68,16 @@ TEST(reactor_test_t, FootprintIsExactAndConstexpr) {
   constexpr std::size_t _bytes_k = precompute(_config_k);
   static_assert(_bytes_k > 0, "footprint must be known at compile time");
 
+  // El footprint coincide con el shard que la arena calcula a partir de la
+  // misma tabla de specs. Esto se comprueba en compile time, así que vale
+  // aunque el kernel no exponga io_uring.
+  constexpr std::size_t _expected_k = []() {
+    arena::object_spec_t _specs[reactor_spec_count_k] = {};
+    make_specs(make_reactor_config(), _specs);
+    return arena::shard_footprint(_specs);
+  }();
+  static_assert(_bytes_k == _expected_k, "precompute must match the shard footprint");
+
   auto _arena_config = make_arena_config(arena::round_to_page(_bytes_k));
   arena::arena_t _arena{_arena_config};
 
@@ -76,8 +87,6 @@ TEST(reactor_test_t, FootprintIsExactAndConstexpr) {
 }
 
 TEST(reactor_test_t, BindArenaAllocatesNothingOnTheHeap) {
-  if (!io_uring_available())
-    GTEST_SKIP() << "io_uring is not available in this environment";
   auto _arena_config = make_arena_config(arena::round_to_page(precompute(make_reactor_config())));
   arena::arena_t _arena{_arena_config};
   reactor_t _reactor;
@@ -86,8 +95,6 @@ TEST(reactor_test_t, BindArenaAllocatesNothingOnTheHeap) {
 }
 
 TEST(reactor_test_t, GetOrCreateIsIdempotentPerName) {
-  if (!io_uring_available())
-    GTEST_SKIP() << "io_uring is not available in this environment";
   auto _arena_config = make_arena_config(arena::round_to_page(precompute(make_reactor_config())));
   arena::arena_t _arena{_arena_config};
   reactor_t _reactor;
@@ -181,8 +188,6 @@ TEST(reactor_test_t, SendsOverIoUring) {
 }
 
 TEST(reactor_test_t, MigratesAnIdleSocketToAnotherQueue) {
-  if (!io_uring_available())
-    GTEST_SKIP() << "io_uring is not available in this environment";
   int _fds[2] = {-1, -1};
   ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, _fds), 0);
 
@@ -240,8 +245,6 @@ TEST(reactor_test_t, RefusesToMigrateABusySocket) {
 }
 
 TEST(reactor_test_t, RebalancesSocketsAcrossQueues) {
-  if (!io_uring_available())
-    GTEST_SKIP() << "io_uring is not available in this environment";
   int _fds[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
   for (int _index = 0; _index < 4; ++_index)
     ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, &_fds[_index * 2]), 0);
@@ -277,8 +280,6 @@ TEST(reactor_test_t, RebalancesSocketsAcrossQueues) {
 }
 
 TEST(reactor_test_t, AffinityPinsEachQueueToItsOwnCore) {
-  if (!io_uring_available())
-    GTEST_SKIP() << "io_uring is not available in this environment";
   reactor_config_t _config = make_reactor_config();
   _config.affinity_ = true;
 
@@ -307,8 +308,6 @@ void on_timer(void *ctx, const op_result_t &result) {
 }
 
 TEST(reactor_test_t, TimerFiresAfterItsDeadline) {
-  if (!io_uring_available())
-    GTEST_SKIP() << "io_uring is not available in this environment";
   auto _arena_config = make_arena_config(arena::round_to_page(precompute(make_reactor_config())));
   arena::arena_t _arena{_arena_config};
   reactor_t _reactor;
@@ -336,8 +335,6 @@ TEST(reactor_test_t, TimerFiresAfterItsDeadline) {
 }
 
 TEST(reactor_test_t, CancelsATimerBeforeItFires) {
-  if (!io_uring_available())
-    GTEST_SKIP() << "io_uring is not available in this environment";
   auto _arena_config = make_arena_config(arena::round_to_page(precompute(make_reactor_config())));
   arena::arena_t _arena{_arena_config};
   reactor_t _reactor;
@@ -361,8 +358,6 @@ TEST(reactor_test_t, CancelsATimerBeforeItFires) {
 }
 
 TEST(reactor_test_t, FiresTimersInDeadlineOrder) {
-  if (!io_uring_available())
-    GTEST_SKIP() << "io_uring is not available in this environment";
   auto _arena_config = make_arena_config(arena::round_to_page(precompute(make_reactor_config())));
   arena::arena_t _arena{_arena_config};
   reactor_t _reactor;
@@ -723,6 +718,73 @@ TEST(reactor_test_t, RunsAUnixDomainServerThatAcceptsAConnection) {
     ::close(_accepted_k);
   _listener.close();
   ::unlink(_path_k);
+}
+
+TEST(reactor_test_t, DegradesWithoutIoUringAndStillRunsTimers) {
+  // Sin io_uring el reactor no puede hacer E/S, pero los timers, los strands y
+  // el resto del mecanismo siguen funcionando. Es lo que permite probar el
+  // modulo en plataformas donde el kernel no expone io_uring.
+  reactor_config_t _config = make_reactor_config();
+  _config.enable_io_ = false;
+
+  auto _arena_config = make_arena_config(arena::round_to_page(precompute(_config)));
+  arena::arena_t _arena{_arena_config};
+  reactor_t _reactor;
+  ASSERT_TRUE(_reactor.bind_arena(_arena, _config));
+  EXPECT_TRUE(_reactor.initialized());
+
+  auto *_queue = _reactor.get_or_create("degraded");
+  ASSERT_NE(_queue, nullptr);
+
+  timer_context_t _context;
+  const std::uint64_t _id_k = _reactor.schedule_timer(_queue, 20000000ULL, on_timer, &_context);
+  ASSERT_NE(_id_k, 0U);
+
+  _reactor.run_all();
+
+  const auto _deadline_k = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (!_context.fired_.load(std::memory_order_acquire) &&
+         std::chrono::steady_clock::now() < _deadline_k) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  _reactor.stop_all();
+
+  EXPECT_TRUE(_context.fired_.load(std::memory_order_acquire));
+}
+
+TEST(reactor_test_t, ReportsEnosysForIoWithoutIoUring) {
+  reactor_config_t _config = make_reactor_config();
+  _config.enable_io_ = false;
+
+  auto _arena_config = make_arena_config(arena::round_to_page(precompute(_config)));
+  arena::arena_t _arena{_arena_config};
+  reactor_t _reactor;
+  ASSERT_TRUE(_reactor.bind_arena(_arena, _config));
+
+  auto *_queue = _reactor.get_or_create("degraded");
+  int _fds[2] = {-1, -1};
+  ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, _fds), 0);
+  auto _socket = _reactor.create_socket(_fds[0], _queue);
+  ASSERT_TRUE(_socket);
+
+  recv_context_t _context;
+  ASSERT_TRUE(_socket.recv(_context.data_, sizeof(_context.data_), on_recv, &_context));
+
+  _reactor.run_all();
+
+  const auto _deadline_k = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (!_context.done_.load(std::memory_order_acquire) &&
+         std::chrono::steady_clock::now() < _deadline_k) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  _reactor.stop_all();
+
+  // La operacion de E/S no se puede ejecutar y lo dice.
+  EXPECT_TRUE(_context.done_.load(std::memory_order_acquire));
+  EXPECT_EQ(_context.ec_.load(std::memory_order_acquire), ENOSYS);
+
+  ::close(_fds[0]);
+  ::close(_fds[1]);
 }
 
 } // namespace

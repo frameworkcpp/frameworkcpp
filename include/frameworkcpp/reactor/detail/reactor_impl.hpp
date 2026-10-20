@@ -6,6 +6,7 @@
 // los tipos completos de la API pública, por eso no lo incluye él mismo.
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <netinet/in.h>
@@ -49,6 +50,24 @@ inline bool reactor_t::bind_arena(arena::arena_t &arena, const reactor_config_t 
   if (bound_)
     return false;
 
+  // Si el bind falla, el reactor queda como si nunca se hubiera llamado: un
+  // reintento no debe encontrar un estado a medias.
+  const auto _reset_k = [this]() noexcept {
+    state_.queues_ = nullptr;
+    state_.queue_handles_ = nullptr;
+    state_.ops_ = nullptr;
+    state_.op_ring_ = nullptr;
+    state_.sockets_ = nullptr;
+    state_.strands_ = nullptr;
+    state_.timers_ = nullptr;
+    state_.timer_heap_ = nullptr;
+    state_.num_queues_ = 0;
+    state_.num_sockets_ = 0;
+    state_.num_strands_ = 0;
+    state_.num_timers_ = 0;
+    affinity_ = false;
+  };
+
   arena::object_spec_t _specs[reactor_spec_count_k] = {};
   make_specs(config, _specs);
 
@@ -61,10 +80,13 @@ inline bool reactor_t::bind_arena(arena::arena_t &arena, const reactor_config_t 
     _shard = arena.create_shard(
         reactor_shard_tag_k, std::span<const arena::object_spec_t>(_specs, reactor_spec_count_k));
   } catch (...) {
+    _reset_k();
     return false;
   }
-  if (!_shard)
+  if (!_shard) {
+    _reset_k();
     return false;
+  }
 
   auto *_queues_raw = _shard.allocate_tagged(reactor_shard_tag_k,
                                              sizeof(detail::queue_control_t) * config.queues_,
@@ -89,8 +111,10 @@ inline bool reactor_t::bind_arena(arena::arena_t &arena, const reactor_config_t 
 
   if (_queues_raw == nullptr || _handles_raw == nullptr || _ops_raw == nullptr ||
       _ring_raw == nullptr || _sockets_raw == nullptr || _strands_raw == nullptr ||
-      _timers_raw == nullptr || _timer_heap_raw == nullptr)
+      _timers_raw == nullptr || _timer_heap_raw == nullptr) {
+    _reset_k();
     return false;
+  }
 
   state_.queues_ = reinterpret_cast<detail::queue_control_t *>(_queues_raw);
   state_.queue_handles_ = reinterpret_cast<queue_t *>(_handles_raw);
@@ -127,8 +151,13 @@ inline bool reactor_t::bind_arena(arena::arena_t &arena, const reactor_config_t 
     new (static_cast<void *>(&state_.queues_[_index])) detail::queue_control_t();
     state_.queues_[_index].op_queue_.init(&state_.op_ring_[_index * config.max_jobs_per_queue_],
                                           config.max_jobs_per_queue_);
-    if (!state_.queues_[_index].ring_.init(static_cast<std::uint32_t>(config.max_jobs_per_queue_)))
-      return false;
+    // El ring de io_uring es opcional: si el kernel no lo expone, la queue
+    // sigue sirviendo timers y strands, y solo las operaciones de E/S
+    // fallan. Un reactor sin E/S es mejor que un reactor que no arranca.
+    if (config.enable_io_) {
+      (void) state_.queues_[_index].ring_.init(
+          static_cast<std::uint32_t>(config.max_jobs_per_queue_));
+    }
     state_.queues_[_index].strands_ = &state_.strands_[_index * config.max_strands_];
     state_.queues_[_index].num_strands_ = config.max_strands_;
     state_.queues_[_index].sockets_ = state_.sockets_;
@@ -484,6 +513,19 @@ inline void reactor_t::run_queue(std::size_t index) const noexcept {
 
     // 4. Esperar completaciones. El timeout permite revisar el flag de stop y
     //    despertar a tiempo para el siguiente deadline.
+    if (!_qc->ring_.is_ready()) {
+      // Sin io_uring no hay completaciones que esperar: la queue solo procesa
+      // timers y operaciones locales. Duerme hasta el proximo deadline.
+      const std::uint64_t _next_k = _qc->timers_.next_deadline();
+      if (_next_k == 0) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      } else {
+        const std::uint64_t _now_k = monotonic_now_ns();
+        const auto _wait_ns_k = (_next_k > _now_k) ? (_next_k - _now_k) : 0;
+        std::this_thread::sleep_for(std::chrono::nanoseconds(_wait_ns_k));
+      }
+      continue;
+    }
     long _timeout_ns = 1000000L;
     const std::uint64_t _next_k = _qc->timers_.next_deadline();
     if (_next_k != 0) {
@@ -538,6 +580,21 @@ inline void reactor_t::complete_op(detail::queue_control_t *qc, struct io_uring_
 
 inline void reactor_t::execute_op(detail::queue_control_t *qc, detail::op_t *op) noexcept {
   const auto _index_k = static_cast<std::uint64_t>(op - qc->ops_segment_);
+  if (!qc->ring_.is_ready() && op->kind_ != op_kind_t::timer_ && op->kind_ != op_kind_t::custom_) {
+    // Sin io_uring no hay E/S posible. La operacion se completa con ENOSYS
+    // para que el handler se entere, en vez de colgarse.
+    op->result_.ec_ = ENOSYS;
+    op->result_.bytes_ = 0;
+    if (op->fn_ != nullptr)
+      op->fn_(op->ctx_, op->result_);
+    if (op->strand_id_ != 0) {
+      const auto _strand_index_k = static_cast<std::size_t>(op->strand_id_ % qc->num_strands_);
+      qc->strands_[_strand_index_k].release();
+    }
+    release_socket(qc, op->socket_id_);
+    op->done_ = true;
+    return;
+  }
   switch (op->kind_) {
   case op_kind_t::recv_: {
     auto *_sqe = qc->ring_.acquire_sqe();
