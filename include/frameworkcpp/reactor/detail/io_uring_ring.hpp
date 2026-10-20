@@ -14,7 +14,7 @@ namespace frameworkcpp::reactor::detail {
 // La cola de trabajo del reactor es independiente de este ring: este solo
 // cubre las operaciones de E/S.
 class io_uring_ring_t {
-  struct io_uring ring_{};
+  io_uring ring_{};
   bool ready_ = false;
   std::uint32_t entries_ = 0;
 
@@ -58,7 +58,7 @@ class io_uring_ring_t {
     if (timeout_ns < 0) {
       return io_uring_wait_cqe(&ring_, out_cqe) == 0;
     }
-    struct __kernel_timespec _ts{};
+    __kernel_timespec _ts{};
     _ts.tv_sec = static_cast<__kernel_time_t>(timeout_ns / 1000000000L);
     _ts.tv_nsec = static_cast<long long>(timeout_ns % 1000000000L);
     return io_uring_wait_cqe_timeout(&ring_, out_cqe, &_ts) == 0;
