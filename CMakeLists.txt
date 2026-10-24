@@ -117,13 +117,13 @@ if(FRAMEWORKCPP_BUILD_TESTING)
     target_compile_features(frameworkcpp_environment_heap_test PRIVATE cxx_std_20)
     gtest_discover_tests(frameworkcpp_environment_heap_test)
 
-    add_executable(frameworkcpp_reactor_test tests/reactor_test.cpp)
-    target_link_libraries(frameworkcpp_reactor_test PRIVATE frameworkcpp GTest::gtest_main)
-    target_compile_features(frameworkcpp_reactor_test PRIVATE cxx_std_20)
-    if(FRAMEWORKCPP_URING_LIBRARY)
+    if(FRAMEWORKCPP_ENABLE_REACTOR)
+        add_executable(frameworkcpp_reactor_test tests/reactor_test.cpp)
+        target_link_libraries(frameworkcpp_reactor_test PRIVATE frameworkcpp GTest::gtest_main)
+        target_compile_features(frameworkcpp_reactor_test PRIVATE cxx_std_20)
         target_link_libraries(frameworkcpp_reactor_test PRIVATE ${FRAMEWORKCPP_URING_LIBRARY})
+        gtest_discover_tests(frameworkcpp_reactor_test)
     endif()
-    gtest_discover_tests(frameworkcpp_reactor_test)
 
     add_executable(frameworkcpp_umbrella_test tests/umbrella_test.cpp)
     target_link_libraries(frameworkcpp_umbrella_test PRIVATE frameworkcpp GTest::gtest_main)
@@ -134,7 +134,7 @@ if(FRAMEWORKCPP_BUILD_TESTING)
     if(FRAMEWORKCPP_ENABLE_CLANG_TIDY)
         find_program(_frameworkcpp_clang_tidy NAMES clang-tidy clang-tidy-19)
         if(_frameworkcpp_clang_tidy)
-            set_target_properties(
+            set(_frameworkcpp_tidy_targets
                 frameworkcpp_version_test
                 frameworkcpp_arena_test
                 frameworkcpp_arena_heap_test
@@ -142,8 +142,13 @@ if(FRAMEWORKCPP_BUILD_TESTING)
                 frameworkcpp_arena_allocator_test
                 frameworkcpp_environment_test
                 frameworkcpp_environment_heap_test
-                frameworkcpp_reactor_test
                 frameworkcpp_umbrella_test
+            )
+            if(FRAMEWORKCPP_ENABLE_REACTOR)
+                list(APPEND _frameworkcpp_tidy_targets frameworkcpp_reactor_test)
+            endif()
+            set_target_properties(
+                ${_frameworkcpp_tidy_targets}
                 PROPERTIES CXX_CLANG_TIDY "${_frameworkcpp_clang_tidy}"
             )
         else()

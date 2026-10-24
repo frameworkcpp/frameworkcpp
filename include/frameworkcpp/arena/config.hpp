@@ -7,12 +7,13 @@
 #include <cstdio>
 #include <new>
 
+#include "frameworkcpp/concurrency.hpp"
+
 namespace frameworkcpp::arena {
-enum class concurrency_model_t : std::uint8_t {
-  single_thread_ = 0,
-  lock_free_ = 1,
-  thread_safe_ = 2,
-};
+
+// The arena and the reactor share one concurrency vocabulary. Keeping the
+// alias here preserves the public `arena::concurrency_model_t` spelling.
+using concurrency_model_t = frameworkcpp::concurrency_model_t;
 
 enum class overflow_mode_t : std::uint8_t {
   throw_error_ = 0,

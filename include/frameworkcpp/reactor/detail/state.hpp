@@ -24,29 +24,37 @@ namespace frameworkcpp::reactor::detail {
 struct socket_slot_t;
 
 struct queue_control_t {
-  // Backends de eventos. Solo uno está activo por queue.
-  io_uring_ring_t ring_;
-  epoll_ring_t epoll_;
-  bool use_epoll_ = false;
-
-  op_queue_t op_queue_;
   strand_t *strands_ = nullptr; // segmento propio de la queue
   std::size_t num_strands_ = 0;
+  std::atomic<std::size_t> next_strand_{0}; // claves repartidas por create_strand
+#ifndef NDEBUG
+  // Verificacion de contrato: single_thread_ en el eje productor solo admite
+  // un hilo. En release no existe ni el costo de leer el thread id.
+  std::atomic<std::uint64_t> producer_thread_{0};
+#endif
   op_t *ops_segment_ = nullptr; // segmento propio de operaciones
   std::size_t ops_segment_size_ = 0;
   op_t *timers_segment_ = nullptr; // segmento propio de timers
   std::size_t timers_segment_size_ = 0;
-  timer_wheel_t timers_;
   // Timers vivos: agendados, esperando o en el heap. El conteo del heap solo
   // no alcanza porque un timer recien agendado aun no entro.
   std::atomic<std::size_t> timers_live_{0};
-
   socket_slot_t *sockets_ = nullptr;
   std::size_t num_sockets_ = 0;
-
-  std::atomic<bool> stop_{false};
   std::thread thread_;
+
+  // Backends de eventos. Solo uno está activo por queue.
+  epoll_ring_t epoll_;
+  timer_wheel_t timers_;
+  op_queue_t op_queue_;
+  io_uring_ring_t ring_;
+  bool use_epoll_ = false;
+#ifndef NDEBUG
+  std::atomic<bool> producer_claimed_{false};
+#endif
+  std::atomic<bool> stop_{false};
   bool running_ = false;
+  queue_concurrency_t concurrency_ = {};
 }; // struct queue_control_t
 
 struct socket_slot_t {

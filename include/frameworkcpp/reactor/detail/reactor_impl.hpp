@@ -6,10 +6,12 @@
 // los tipos completos de la API pública, por eso no lo incluye él mismo.
 
 #include <atomic>
+#include <cassert>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <fcntl.h>
+#include <functional>
 #include <netinet/in.h>
 #include <new>
 #include <sys/un.h>
@@ -25,6 +27,23 @@
 #include "frameworkcpp/reactor/detail/timer_wheel.hpp"
 
 namespace frameworkcpp::reactor::detail {
+
+#ifndef NDEBUG
+// Contrato, no ceremonia: si una queue promete single_thread_ en el eje
+// productor, el primer post fija el hilo y cualquier otro aborta en debug.
+inline void assert_single_producer(queue_control_t *qc) noexcept {
+  if (qc->concurrency_.producers_ != concurrency_model_t::single_thread_)
+    return;
+  const auto _token_k =
+      static_cast<std::uint64_t>(std::hash<std::thread::id>{}(std::this_thread::get_id()));
+  if (!qc->producer_claimed_.exchange(true, std::memory_order_acq_rel)) {
+    qc->producer_thread_.store(_token_k, std::memory_order_release);
+    return;
+  }
+  assert(qc->producer_thread_.load(std::memory_order_acquire) == _token_k &&
+         "single_thread_ queue posted from more than one thread");
+}
+#endif
 
 // Localiza el slot de un socket por su id. Devuelve nullptr si el id no
 // corresponde a ningún socket registrado.
@@ -50,6 +69,18 @@ inline reactor_t::~reactor_t() {
 inline bool reactor_t::bind_arena(arena::arena_t &arena, const reactor_config_t &config) noexcept {
   if (bound_)
     return false;
+  if (config.queues_ == 0 || config.queues_ > max_reactor_queues_k ||
+      config.max_jobs_per_queue_ == 0 ||
+      (config.max_jobs_per_queue_ & (config.max_jobs_per_queue_ - 1)) != 0 ||
+      config.max_sockets_ == 0 || config.max_strands_ == 0 || config.max_timers_per_queue_ == 0)
+    return false;
+  // Cada queue ejecuta un solo event loop: el ring de io_uring y el heap de
+  // timers no admiten varios consumidores. La perilla se valida para que no
+  // prometa hilos que no existen.
+  if (config.workers_per_queue_ != 1)
+    return false;
+  if (config.concurrency_.consumers_ != concurrency_model_t::single_thread_)
+    return false;
 
   // Si el bind falla, el reactor queda como si nunca se hubiera llamado: un
   // reintento no debe encontrar un estado a medias.
@@ -67,6 +98,7 @@ inline bool reactor_t::bind_arena(arena::arena_t &arena, const reactor_config_t 
     state_.num_strands_ = 0;
     state_.num_timers_ = 0;
     affinity_ = false;
+    concurrency_ = {};
   };
 
   arena::object_spec_t _specs[reactor_spec_count_k] = {};
@@ -112,10 +144,14 @@ inline bool reactor_t::bind_arena(arena::arena_t &arena, const reactor_config_t 
   auto *_events_raw = _shard.allocate_tagged(reactor_shard_tag_k + 8,
                                              sizeof(struct epoll_event) * _total_ops_k,
                                              alignof(struct epoll_event));
+  auto *_sequence_raw = _shard.allocate_tagged(reactor_shard_tag_k + 9,
+                                               sizeof(std::atomic<std::size_t>) * _total_ops_k,
+                                               alignof(std::atomic<std::size_t>));
 
   if (_queues_raw == nullptr || _handles_raw == nullptr || _ops_raw == nullptr ||
       _ring_raw == nullptr || _sockets_raw == nullptr || _strands_raw == nullptr ||
-      _timers_raw == nullptr || _timer_heap_raw == nullptr || _events_raw == nullptr) {
+      _timers_raw == nullptr || _timer_heap_raw == nullptr || _events_raw == nullptr ||
+      _sequence_raw == nullptr) {
     _reset_k();
     return false;
   }
@@ -154,8 +190,17 @@ inline bool reactor_t::bind_arena(arena::arena_t &arena, const reactor_config_t 
 
   for (std::size_t _index = 0; _index < config.queues_; ++_index) {
     new (static_cast<void *>(&state_.queues_[_index])) detail::queue_control_t();
-    state_.queues_[_index].op_queue_.init(&state_.op_ring_[_index * config.max_jobs_per_queue_],
-                                          config.max_jobs_per_queue_);
+    auto *_sequence_k = reinterpret_cast<std::atomic<std::size_t> *>(
+        _sequence_raw + (_index * config.max_jobs_per_queue_ * sizeof(std::atomic<std::size_t>)));
+    if (!state_.queues_[_index].op_queue_.init(
+            &state_.op_ring_[_index * config.max_jobs_per_queue_],
+            _sequence_k,
+            config.max_jobs_per_queue_,
+            config.concurrency_)) {
+      _reset_k();
+      return false;
+    }
+    state_.queues_[_index].concurrency_ = config.concurrency_;
     // Backend de eventos. io_uring es el de performance; epoll es el
     // portable y entra cuando el kernel no expone io_uring.
     const bool _want_io_uring_k = config.backend_ != backend_t::epoll_;
@@ -200,9 +245,13 @@ inline bool reactor_t::bind_arena(arena::arena_t &arena, const reactor_config_t 
     state_.queue_handles_[_index].name_ = "";
     state_.queue_handles_[_index].ops_segment_ = state_.queues_[_index].ops_segment_;
     state_.queue_handles_[_index].ops_segment_size_ = config.max_jobs_per_queue_;
+    state_.queue_handles_[_index].concurrency_ = config.concurrency_;
+    state_.queue_handles_[_index].owner_ = this;
+    state_.queue_handles_[_index].index_ = _index;
   }
 
   affinity_ = config.affinity_;
+  concurrency_ = config.concurrency_;
   bound_ = true;
   return true;
 }
@@ -218,19 +267,57 @@ inline backend_t reactor_t::get_backend() const noexcept {
 }
 
 inline queue_t *reactor_t::get_or_create(std::string_view name) const noexcept {
-  if (!bound_)
+  return get_or_create(name, concurrency_);
+}
+
+inline queue_t *reactor_t::get_or_create(std::string_view name,
+                                         queue_concurrency_t concurrency) const noexcept {
+  if (!bound_ || concurrency.consumers_ != concurrency_model_t::single_thread_)
     return nullptr;
   for (std::size_t _index = 0; _index < state_.num_queues_; ++_index) {
-    if (state_.queue_handles_[_index].name_ == name)
-      return &state_.queue_handles_[_index];
+    queue_t *_handle = &state_.queue_handles_[_index];
+    if (_handle->name_ != name)
+      continue;
+    if (_handle->concurrency_.producers_ == concurrency.producers_ &&
+        _handle->concurrency_.consumers_ == concurrency.consumers_)
+      return _handle;
+    return nullptr; // el modelo de una queue no cambia en caliente
   }
   for (std::size_t _index = 0; _index < state_.num_queues_; ++_index) {
-    if (state_.queue_handles_[_index].name_.empty()) {
-      state_.queue_handles_[_index].name_ = name;
-      return &state_.queue_handles_[_index];
-    }
+    queue_t *_handle = &state_.queue_handles_[_index];
+    if (!_handle->name_.empty())
+      continue;
+    detail::queue_control_t *_qc = &state_.queues_[_index];
+    if (!_qc->op_queue_.set_concurrency(concurrency))
+      return nullptr;
+    _qc->concurrency_ = concurrency;
+    _handle->concurrency_ = concurrency;
+    _handle->name_ = name;
+    return _handle;
   }
   return nullptr;
+}
+
+inline strand_t reactor_t::create_strand(queue_t *queue,
+                                         concurrency_model_t concurrency) const noexcept {
+  strand_t _strand{};
+  if (!bound_ || queue == nullptr || queue->control_ == nullptr)
+    return _strand;
+  detail::queue_control_t *_qc = queue->control_;
+  const std::size_t _index_k = _qc->next_strand_.fetch_add(1, std::memory_order_relaxed);
+  if (_index_k >= _qc->num_strands_)
+    return _strand;
+  _qc->strands_[_index_k].set_concurrency_model(concurrency);
+  _strand.id_ = static_cast<std::uint64_t>(_index_k) + 1;
+  _strand.concurrency_ = concurrency;
+  _strand.queue_ = queue;
+  return _strand;
+}
+
+inline strand_t reactor_t::create_strand(queue_t *queue) const noexcept {
+  if (queue == nullptr)
+    return strand_t{};
+  return create_strand(queue, queue->get_concurrency().producers_);
 }
 
 inline socket_t reactor_t::create_socket(int fd, queue_t *queue) const noexcept {
@@ -260,7 +347,7 @@ inline socket_t reactor_t::create_socket(int fd, queue_t *queue) const noexcept 
 
 // Reloj monotónico en nanosegundos. Es la base de todos los deadlines.
 inline std::uint64_t monotonic_now_ns() noexcept {
-  struct timespec _ts {};
+  struct timespec _ts{};
   ::clock_gettime(CLOCK_MONOTONIC, &_ts);
   return (static_cast<std::uint64_t>(_ts.tv_sec) * 1000000000ULL) +
          static_cast<std::uint64_t>(_ts.tv_nsec);
@@ -498,6 +585,7 @@ inline void reactor_t::run_all() noexcept {
     return;
   state_.running_.store(true, std::memory_order_release);
   for (std::size_t _index = 0; _index < state_.num_queues_; ++_index) {
+    state_.queues_[_index].stop_.store(false, std::memory_order_release);
     state_.queues_[_index].running_ = true;
     state_.queues_[_index].thread_ = std::thread([this, _index]() { this->run_queue(_index); });
   }
@@ -1053,6 +1141,11 @@ inline bool queue_t::post(op_kind_t kind,
                           std::size_t addr_len) noexcept {
   if (control_ == nullptr || ops_segment_ == nullptr)
     return false;
+#ifndef NDEBUG
+  detail::assert_single_producer(control_);
+  if (strand_id != 0 && control_->num_strands_ != 0)
+    control_->strands_[strand_id % control_->num_strands_].assert_submission_thread();
+#endif
   auto *_op = acquire_op(ops_segment_, ops_segment_size_);
   if (_op != nullptr) {
     {
@@ -1073,15 +1166,27 @@ inline bool queue_t::post(op_kind_t kind,
       }
       _op->result_ = op_result_t{};
       _op->next_ = nullptr;
-      return control_->op_queue_.push(_op);
+      if (!control_->op_queue_.push(_op)) {
+        _op->done_.store(true, std::memory_order_release);
+        return false;
+      }
+      return true;
     }
   }
   return false; // pool de ops de esta queue agotado
 }
 
-inline void queue_t::run() noexcept {}
+inline void queue_t::run() noexcept {
+  if (owner_ == nullptr || control_ == nullptr)
+    return;
+  control_->running_ = true;
+  owner_->run_queue(index_);
+}
 
-inline void queue_t::stop() noexcept {}
+inline void queue_t::stop() noexcept {
+  if (control_ != nullptr)
+    control_->stop_.store(true, std::memory_order_release);
+}
 
 inline std::size_t queue_t::pending_ops() const noexcept {
   if (control_ == nullptr)

@@ -6,7 +6,7 @@
 // owner of the reserved memory and the shard carver. Grab just the pieces you
 // need with <frameworkcpp/arena/shard.hpp>, <frameworkcpp/arena/bucket.hpp>,
 // <frameworkcpp/arena/unique_ptr.hpp>, <frameworkcpp/arena/shared_ptr.hpp> or
-// <frameworkcpp/arena/allocator.hpp>.
+// <frameworkcpp/arena/arena_allocator.hpp>.
 
 #include <array>
 #include <atomic>
@@ -44,7 +44,7 @@ class arena_t {
   std::array<detail::region_t, max_arena_regions_k> regions_ = {};
   std::array<shard_entry_t, max_arena_shards_k> shards_ = {};
   std::size_t region_count_ = 0;
-  std::size_t shard_count_ = 0;
+  std::atomic<std::size_t> shard_count_{0};
   std::atomic<std::size_t> capacity_{0};
   std::atomic<std::size_t> used_{0};
   std::atomic<bool> soft_exceeded_{false};
@@ -90,7 +90,7 @@ inline arena_shard_t arena_t::create_shard(std::uint64_t tag,
 inline arena_shard_t arena_t::create_shard(std::uint64_t tag,
                                            std::span<const object_spec_t> specs) {
   const std::lock_guard _lock_k{registry_mutex_};
-  const auto _count_k = shard_count_;
+  const auto _count_k = shard_count_.load(std::memory_order_relaxed);
   for (std::size_t _index = 0; _index < _count_k; ++_index) {
     if (shards_[_index].tag_ == tag) {
       arena_shard_t _view;
@@ -102,8 +102,7 @@ inline arena_shard_t arena_t::create_shard(std::uint64_t tag,
 }
 
 inline arena_shard_t arena_t::get_shard(std::uint64_t tag) const {
-  const std::lock_guard _lock_k{registry_mutex_};
-  const auto _count_k = shard_count_;
+  const auto _count_k = shard_count_.load(std::memory_order_acquire);
   for (std::size_t _index = 0; _index < _count_k; ++_index) {
     if (shards_[_index].tag_ == tag) {
       arena_shard_t _view;
@@ -170,7 +169,8 @@ inline arena_shard_t arena_t::build_shard(std::uint64_t tag, std::span<const obj
     if (!detail::is_spec_valid(_spec))
       return _view;
   }
-  if (shard_count_ >= config_.max_shards_)
+  const auto _shard_count_k = shard_count_.load(std::memory_order_relaxed);
+  if (_shard_count_k >= config_.max_shards_)
     return _view;
   const auto _bytes_k = detail::slice_bytes_runtime(specs);
   auto *_region = region_for(_bytes_k);
@@ -181,7 +181,7 @@ inline arena_shard_t arena_t::build_shard(std::uint64_t tag, std::span<const obj
     return _view;
   used_.fetch_add(_bytes_k, std::memory_order_relaxed);
 
-  const auto _shard_index_k = static_cast<std::uint32_t>(shard_count_);
+  const auto _shard_index_k = static_cast<std::uint32_t>(_shard_count_k);
   const auto _region_index_k = static_cast<std::uint32_t>(_region - regions_.data());
   const auto _slice_offset_k = static_cast<std::size_t>(_slice - _region->get_base());
 
@@ -247,17 +247,17 @@ inline arena_shard_t arena_t::build_shard(std::uint64_t tag, std::span<const obj
     _descriptors[_position] = _key_k;
   }
 
-  shards_[shard_count_++] = {tag,
+  shards_[_shard_index_k] = {tag,
                              static_cast<std::uint32_t>(_region_index_k),
                              static_cast<std::uint32_t>(_slice_offset_k)};
+  shard_count_.store(_shard_count_k + 1, std::memory_order_release);
 
   _view.hdr_ = _header;
   return _view;
 }
 
 inline std::size_t arena_t::get_shard_count() const noexcept {
-  const std::lock_guard _lock_k{registry_mutex_};
-  return shard_count_;
+  return shard_count_.load(std::memory_order_acquire);
 }
 
 inline std::size_t arena_t::get_capacity() const noexcept {
@@ -271,9 +271,9 @@ inline std::size_t arena_t::get_used() const noexcept {
 }
 
 inline std::size_t arena_t::get_live() const noexcept {
-  const std::lock_guard _lock_k{registry_mutex_};
   std::size_t _total = 0;
-  for (std::size_t _index = 0; _index < shard_count_; ++_index) {
+  const auto _count_k = shard_count_.load(std::memory_order_acquire);
+  for (std::size_t _index = 0; _index < _count_k; ++_index) {
     const auto &_entry = shards_[_index];
     auto *_slice = regions_[_entry.region_index_].get_base() + _entry.slice_offset_;
     auto *_shard_header = reinterpret_cast<detail::shard_header_t *>(_slice);

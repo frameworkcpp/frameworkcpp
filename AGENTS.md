@@ -7,10 +7,11 @@ touching anything.
 
 FrameworkCpp is a **header-only C++20 framework for building real-time systems**.
 It is modular: each module lives under `include/frameworkcpp/<module>/` and is
-self-contained. The current modules are `arena` (memory management) and, in
-progress, `environment` (environment management). The project targets RT
-constraints: no dynamic allocation at runtime on hot paths and lock-free fast
-paths.
+self-contained. The current modules are `arena` (memory management),
+`environment` (environment management) and `reactor` (event loops on io_uring
+and epoll). `frameworkcpp/concurrency.hpp` holds the concurrency vocabulary
+shared by the modules. The project targets RT constraints: no dynamic
+allocation at runtime on hot paths and lock-free fast paths.
 
 ## Style
 
