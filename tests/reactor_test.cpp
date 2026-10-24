@@ -939,7 +939,8 @@ reactor_config_t make_concurrency_config(concurrency_model_t model) {
   _config.max_strands_ = 8;
   _config.max_timers_per_queue_ = 8;
   _config.affinity_ = false;
-  _config.concurrency_ = model;
+  _config.concurrency_.producers_ = model;
+  _config.concurrency_.consumers_ = concurrency_model_t::single_thread_;
   return _config;
 }
 
@@ -956,8 +957,8 @@ void run_concurrent_posts(concurrency_model_t model) {
 
   auto *_queue = _reactor.get_or_create("producers");
   ASSERT_NE(_queue, nullptr);
-  EXPECT_EQ(_queue->get_concurrency_model(), model);
-  EXPECT_EQ(_reactor.get_concurrency_model(), model);
+  EXPECT_EQ(_queue->get_concurrency().producers_, model);
+  EXPECT_EQ(_reactor.get_concurrency().producers_, model);
 
   count_context_t _context;
   _reactor.run_all();
@@ -1057,6 +1058,39 @@ TEST(reactor_test_t, RejectsUnsupportedQueueConfiguration) {
   reactor_config_t _non_pow2 = make_concurrency_config(concurrency_model_t::lock_free_);
   _non_pow2.max_jobs_per_queue_ = 100;
   EXPECT_FALSE(_reactor.bind_arena(_arena, _non_pow2));
+
+  reactor_config_t _multi_consumer = make_concurrency_config(concurrency_model_t::lock_free_);
+  _multi_consumer.concurrency_.consumers_ = concurrency_model_t::lock_free_;
+  EXPECT_FALSE(_reactor.bind_arena(_arena, _multi_consumer));
+}
+
+TEST(reactor_test_t, QueuesCanChooseTheirOwnConcurrencyModel) {
+  reactor_config_t _config_k = make_concurrency_config(concurrency_model_t::single_thread_);
+  _config_k.queues_ = 2;
+
+  auto _arena_config = make_arena_config(arena::round_to_page(precompute(_config_k)));
+  arena::arena_t _arena{_arena_config};
+  reactor_t _reactor;
+  ASSERT_TRUE(_reactor.bind_arena(_arena, _config_k));
+
+  auto *_inherited = _reactor.get_or_create("inherited");
+  ASSERT_NE(_inherited, nullptr);
+  EXPECT_EQ(_inherited->get_concurrency().producers_, concurrency_model_t::single_thread_);
+
+  const queue_concurrency_t _lock_free_k{concurrency_model_t::lock_free_,
+                                         concurrency_model_t::single_thread_};
+  auto *_override = _reactor.get_or_create("override", _lock_free_k);
+  ASSERT_NE(_override, nullptr);
+  EXPECT_EQ(_override->get_concurrency().producers_, concurrency_model_t::lock_free_);
+  EXPECT_EQ(_reactor.get_or_create("override", _lock_free_k), _override);
+
+  const strand_t _strand_k = _reactor.create_strand(_override);
+  ASSERT_TRUE(_strand_k);
+  EXPECT_EQ(_strand_k.get_concurrency_model(), concurrency_model_t::lock_free_);
+
+  const queue_concurrency_t _thread_safe_k{concurrency_model_t::thread_safe_,
+                                           concurrency_model_t::single_thread_};
+  EXPECT_EQ(_reactor.get_or_create("override", _thread_safe_k), nullptr);
 }
 
 } // namespace

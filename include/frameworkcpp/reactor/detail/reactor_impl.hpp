@@ -6,10 +6,12 @@
 // los tipos completos de la API pública, por eso no lo incluye él mismo.
 
 #include <atomic>
+#include <cassert>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <fcntl.h>
+#include <functional>
 #include <netinet/in.h>
 #include <new>
 #include <sys/un.h>
@@ -25,6 +27,23 @@
 #include "frameworkcpp/reactor/detail/timer_wheel.hpp"
 
 namespace frameworkcpp::reactor::detail {
+
+#ifndef NDEBUG
+// Contrato, no ceremonia: si una queue promete single_thread_ en el eje
+// productor, el primer post fija el hilo y cualquier otro aborta en debug.
+inline void assert_single_producer(queue_control_t *qc) noexcept {
+  if (qc->concurrency_.producers_ != concurrency_model_t::single_thread_)
+    return;
+  const auto _token_k =
+      static_cast<std::uint64_t>(std::hash<std::thread::id>{}(std::this_thread::get_id()));
+  if (!qc->producer_claimed_.exchange(true, std::memory_order_acq_rel)) {
+    qc->producer_thread_.store(_token_k, std::memory_order_release);
+    return;
+  }
+  assert(qc->producer_thread_.load(std::memory_order_acquire) == _token_k &&
+         "single_thread_ queue posted from more than one thread");
+}
+#endif
 
 // Localiza el slot de un socket por su id. Devuelve nullptr si el id no
 // corresponde a ningún socket registrado.
@@ -60,6 +79,8 @@ inline bool reactor_t::bind_arena(arena::arena_t &arena, const reactor_config_t 
   // prometa hilos que no existen.
   if (config.workers_per_queue_ != 1)
     return false;
+  if (config.concurrency_.consumers_ != concurrency_model_t::single_thread_)
+    return false;
 
   // Si el bind falla, el reactor queda como si nunca se hubiera llamado: un
   // reintento no debe encontrar un estado a medias.
@@ -77,7 +98,7 @@ inline bool reactor_t::bind_arena(arena::arena_t &arena, const reactor_config_t 
     state_.num_strands_ = 0;
     state_.num_timers_ = 0;
     affinity_ = false;
-    concurrency_ = concurrency_model_t::lock_free_;
+    concurrency_ = {};
   };
 
   arena::object_spec_t _specs[reactor_spec_count_k] = {};
@@ -179,6 +200,7 @@ inline bool reactor_t::bind_arena(arena::arena_t &arena, const reactor_config_t 
       _reset_k();
       return false;
     }
+    state_.queues_[_index].concurrency_ = config.concurrency_;
     // Backend de eventos. io_uring es el de performance; epoll es el
     // portable y entra cuando el kernel no expone io_uring.
     const bool _want_io_uring_k = config.backend_ != backend_t::epoll_;
@@ -245,17 +267,33 @@ inline backend_t reactor_t::get_backend() const noexcept {
 }
 
 inline queue_t *reactor_t::get_or_create(std::string_view name) const noexcept {
-  if (!bound_)
+  return get_or_create(name, concurrency_);
+}
+
+inline queue_t *reactor_t::get_or_create(std::string_view name,
+                                         queue_concurrency_t concurrency) const noexcept {
+  if (!bound_ || concurrency.consumers_ != concurrency_model_t::single_thread_)
     return nullptr;
   for (std::size_t _index = 0; _index < state_.num_queues_; ++_index) {
-    if (state_.queue_handles_[_index].name_ == name)
-      return &state_.queue_handles_[_index];
+    queue_t *_handle = &state_.queue_handles_[_index];
+    if (_handle->name_ != name)
+      continue;
+    if (_handle->concurrency_.producers_ == concurrency.producers_ &&
+        _handle->concurrency_.consumers_ == concurrency.consumers_)
+      return _handle;
+    return nullptr; // el modelo de una queue no cambia en caliente
   }
   for (std::size_t _index = 0; _index < state_.num_queues_; ++_index) {
-    if (state_.queue_handles_[_index].name_.empty()) {
-      state_.queue_handles_[_index].name_ = name;
-      return &state_.queue_handles_[_index];
-    }
+    queue_t *_handle = &state_.queue_handles_[_index];
+    if (!_handle->name_.empty())
+      continue;
+    detail::queue_control_t *_qc = &state_.queues_[_index];
+    if (!_qc->op_queue_.set_concurrency(concurrency))
+      return nullptr;
+    _qc->concurrency_ = concurrency;
+    _handle->concurrency_ = concurrency;
+    _handle->name_ = name;
+    return _handle;
   }
   return nullptr;
 }
@@ -279,7 +317,7 @@ inline strand_t reactor_t::create_strand(queue_t *queue,
 inline strand_t reactor_t::create_strand(queue_t *queue) const noexcept {
   if (queue == nullptr)
     return strand_t{};
-  return create_strand(queue, queue->get_concurrency_model());
+  return create_strand(queue, queue->get_concurrency().producers_);
 }
 
 inline socket_t reactor_t::create_socket(int fd, queue_t *queue) const noexcept {
@@ -1103,6 +1141,11 @@ inline bool queue_t::post(op_kind_t kind,
                           std::size_t addr_len) noexcept {
   if (control_ == nullptr || ops_segment_ == nullptr)
     return false;
+#ifndef NDEBUG
+  detail::assert_single_producer(control_);
+  if (strand_id != 0 && control_->num_strands_ != 0)
+    control_->strands_[strand_id % control_->num_strands_].assert_submission_thread();
+#endif
   auto *_op = acquire_op(ops_segment_, ops_segment_size_);
   if (_op != nullptr) {
     {

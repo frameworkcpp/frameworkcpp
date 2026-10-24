@@ -5,6 +5,11 @@ hand `bind_arena` a `reactor_config_t` and it carves exactly that much space
 out of an arena.
 
 ```cpp
+struct queue_concurrency_t {
+    concurrency_model_t producers_ = concurrency_model_t::lock_free_;
+    concurrency_model_t consumers_ = concurrency_model_t::single_thread_;
+};
+
 struct reactor_config_t {
     std::size_t queues_ = 1;                 // named event loops
     std::size_t max_jobs_per_queue_ = 1024;  // operations in flight per queue
@@ -13,7 +18,7 @@ struct reactor_config_t {
     std::size_t max_timers_per_queue_ = 256; // pending timers per queue
     bool affinity_ = false;                  // pin each queue to its own core
     backend_t backend_ = backend_t::auto_;   // io_uring, epoll or auto
-    concurrency_model_t concurrency_ = concurrency_model_t::lock_free_;
+    queue_concurrency_t concurrency_ = {};   // default for new queues
     std::size_t workers_per_queue_ = 1;      // must be 1 today
 };
 ```
@@ -28,30 +33,41 @@ struct reactor_config_t {
 | `max_timers_per_queue_` | Pending timers per queue. | A queue's timers live in their own pool, so a full timer pool never starves the I/O pool. |
 | `affinity_` | Whether queues are pinned to a core. | Queue *n* is pinned to CPU *n*. The pin is best-effort. |
 | `backend_` | Which event backend to use. | `auto_` picks `io_uring` when the kernel has it, `epoll` otherwise. |
-| `concurrency_` | How a queue's operation ring is shared. | `single_thread_`, `lock_free_` or `thread_safe_`. See below. |
+| `concurrency_` | Default concurrency contract for new queues. | Two independent axes: producers and consumers. See below. |
 
 ## Choosing the concurrency model
 
-Every queue is created with one model, and that model does not change:
+The model belongs to a queue, not to the reactor. `reactor_config_t` only sets
+the default that `get_or_create(name)` inherits; `get_or_create(name, model)`
+chooses a different contract for that queue. A queue keeps its model for life:
+asking for the same name with another model returns `nullptr`.
 
-| Model | Producer/consumer contract | Cost |
+The contract has two axes because producing and consuming are different jobs:
+
+| `producers_` | Who may call `post` | Cost |
 | --- | --- | --- |
-| `single_thread_` | One thread posts and the queue's thread consumes. | plain loads and stores |
-| `lock_free_` | Any number of threads post and consume. | atomics only |
-| `thread_safe_` | Any number of threads post and consume. | one mutex per queue |
+| `single_thread_` | Exactly one thread, verified in debug builds | plain loads and stores |
+| `lock_free_` | Any number of threads | one CAS per post |
+| `thread_safe_` | Any number of threads | one producer-side mutex per queue |
 
-The default is `lock_free_`, because the public API lets any thread post an
-operation. Drop to `single_thread_` only when you can prove one producer per
-queue; it skips the compare-exchange on every post. Use `thread_safe_` when you
-want correctness with the simplest possible implementation, or while debugging.
+`consumers_` is separate because the consumer side is not symmetric with the
+producer side. Today it must be `single_thread_`: each queue has one event loop,
+and the io_uring ring, timer heap and strands do not support several consumers.
+`bind_arena` rejects anything else, so the struct cannot promise concurrency
+the reactor does not implement.
 
-Strands carry their own model too. `create_strand(queue, model)` makes the
-contract explicit; the no-argument overload inherits the queue's model. The
-model is a declaration of how the key is used, not a runtime switch: today each
-queue has one consumer, so operations on any strand are already serialised. The
-declaration still matters because it documents intent and is enforced when
-queues grow more than one consumer. A strand may be stronger than its queue —
-for example a `thread_safe_` strand on a `single_thread_` queue.
+`thread_safe_` locks only producers. The single consumer keeps using the serial
+path, so the mutex never serialises the queue's hot loop. `lock_free_` uses a
+bounded Vyukov ring (MPMC) even though consumption is single-threaded today;
+that keeps producer publication correct for every allowed producer model.
+
+Strands have their own submission contract. `create_strand(queue, model)`
+declares how many threads will post operations for that key; the no-argument
+overload inherits the queue's `producers_` model. A `single_thread_` strand is
+checked in debug builds, just like a `single_thread_` queue. If several threads
+will submit to the same strand, create it with `lock_free_` or `thread_safe_`.
+Handler serialisation is already guaranteed by the single queue consumer; the
+strand model is about submission, not about running two handlers at once.
 
 ## Choosing a backend
 

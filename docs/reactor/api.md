@@ -25,6 +25,10 @@ class reactor_t {
     [[nodiscard]] bool initialized() const noexcept;
 
     queue_t *get_or_create(std::string_view name) const noexcept;
+    queue_t *get_or_create(std::string_view name,
+                           queue_concurrency_t concurrency) const noexcept;
+    strand_t create_strand(queue_t *queue, concurrency_model_t concurrency) const noexcept;
+    strand_t create_strand(queue_t *queue) const noexcept;
     socket_t create_socket(int fd, queue_t *queue) const noexcept;
     socket_t open_socket(int family, int type, int protocol, queue_t *queue) const noexcept;
     socket_t listen_tcp(queue_t *queue, const sockaddr *addr, std::size_t addr_len,
@@ -78,20 +82,29 @@ if (!reactor.bind_arena(arena, config))
 
 ```cpp
 queue_t *get_or_create(std::string_view name) noexcept;
+queue_t *get_or_create(std::string_view name, queue_concurrency_t concurrency) noexcept;
 ```
 
 Returns the queue called `name`, creating it if this is the first time the name
-appears. Two calls with the same name return the same pointer; two calls with
-different names return different queues.
+appears. Two calls with the same name and model return the same pointer; two
+calls with different names return different queues.
 
-- Returns `nullptr` when the reactor is not bound, or when the pool of queues is
-  exhausted and the name is new.
+- The first overload inherits `reactor_config_t::concurrency_`.
+- The second gives that queue its own producer/consumer contract.
+- A queue keeps its model for life. Asking for an existing name with another
+  model returns `nullptr`.
+- Returns `nullptr` when the reactor is not bound, the model is unsupported, or
+  the pool of queues is exhausted and the name is new.
 - The name is a `std::string_view`: it is not copied, so it must outlive the
   reactor.
 
 ```cpp
 auto *ingest = reactor.get_or_create("ingest");
 auto *same   = reactor.get_or_create("ingest");   // ingest == same
+
+queue_concurrency_t shared{
+    concurrency_model_t::lock_free_, concurrency_model_t::single_thread_};
+auto *workers = reactor.get_or_create("workers", shared);
 ```
 
 ## create_strand
@@ -101,15 +114,18 @@ strand_t create_strand(queue_t *queue, concurrency_model_t concurrency) noexcept
 strand_t create_strand(queue_t *queue) noexcept;   // inherits the queue's model
 ```
 
-Creates a serialisation key owned by `queue` and records the concurrency model
+Creates a serialisation key owned by `queue` and records the submission model
 the caller promises for it. Operations sharing `strand.id()` on the same queue
-never run at the same time. The no-argument overload copies the queue's model.
+never run at the same time because that queue has one consumer. The
+no-argument overload copies the queue's `producers_` model.
 
 - Returns an invalid strand when the reactor is not bound, the queue is null, or
   `max_strands_` keys have already been created.
-- The model is a declaration, not a runtime switch: `single_thread_` says the
-  strand is used from one thread, `lock_free_` says it may be shared without a
-  lock, and `thread_safe_` says the caller will serialise it.
+- `single_thread_` promises one submitting thread. Debug builds abort if a
+  second thread posts an operation with that strand id.
+- `lock_free_` and `thread_safe_` allow several submitting threads. They do not
+  change handler execution: the queue's single consumer still runs handlers of a
+  strand one at a time.
 
 ```cpp
 auto strand = reactor.create_strand(queue, concurrency_model_t::lock_free_);
@@ -282,6 +298,15 @@ server.
 Which event backend the reactor ended up using. With `backend_t::auto_` in the
 configuration this tells you whether the kernel offered `io_uring` or whether
 the reactor fell back to `epoll` — useful to know before you read a timing.
+
+## queue_t::get_concurrency
+
+```cpp
+[[nodiscard]] queue_concurrency_t get_concurrency() const noexcept;
+```
+
+The producer/consumer contract the queue was created with. It never changes for
+the life of the queue.
 
 ## get_socket_count
 

@@ -48,7 +48,7 @@ class queue_t {
   detail::queue_control_t *control_ = nullptr;
   detail::op_t *ops_segment_ = nullptr;
   std::size_t ops_segment_size_ = 0;
-  concurrency_model_t concurrency_ = concurrency_model_t::lock_free_;
+  queue_concurrency_t concurrency_ = {};
   reactor_t *owner_ = nullptr;
   std::size_t index_ = 0;
 
@@ -60,7 +60,7 @@ class queue_t {
   [[nodiscard]] std::string_view name() const noexcept { return name_; }
 
   // Contrato con el que se creo esta queue. No cambia durante su vida.
-  [[nodiscard]] concurrency_model_t get_concurrency_model() const noexcept { return concurrency_; }
+  [[nodiscard]] queue_concurrency_t get_concurrency() const noexcept { return concurrency_; }
 
   // Identificador numérico de la queue. Estable durante toda la vida del
   // reactor; 0 si el handle no está ligado a ninguna queue.
@@ -209,11 +209,18 @@ class reactor_t {
   // real está disponible: con epoll no hay io_uring detrás.
   [[nodiscard]] backend_t get_backend() const noexcept;
 
-  // Contrato de concurrencia de las queues de este reactor.
-  [[nodiscard]] concurrency_model_t get_concurrency_model() const noexcept { return concurrency_; }
+  // Contrato por defecto que heredan las queues de este reactor.
+  [[nodiscard]] queue_concurrency_t get_concurrency() const noexcept { return concurrency_; }
 
-  // Devuelve la misma queue_t para el mismo nombre (idempotente).
+  // Devuelve la misma queue_t para el mismo nombre (idempotente). Una queue
+  // nueva hereda el contrato por defecto del reactor.
   [[nodiscard]] queue_t *get_or_create(std::string_view name) const noexcept;
+
+  // Igual que el anterior, pero la queue nueva usa `concurrency`. Si el nombre
+  // ya existe con otro contrato, devuelve nullptr: el modelo no cambia en
+  // caliente.
+  [[nodiscard]] queue_t *get_or_create(std::string_view name,
+                                       queue_concurrency_t concurrency) const noexcept;
 
   // Crea una clave de serializacion propia de `queue` con un modelo explicito.
   // Devuelve un strand no valido si la queue no existe o se agotaron las
@@ -307,7 +314,7 @@ class reactor_t {
 
   detail::reactor_state_t state_{};
   std::atomic<std::uint64_t> timer_id_{1};
-  concurrency_model_t concurrency_ = concurrency_model_t::lock_free_;
+  queue_concurrency_t concurrency_ = {};
   bool bound_ = false;
   bool affinity_ = false;
 }; // class reactor_t

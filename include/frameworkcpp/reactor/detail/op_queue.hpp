@@ -10,21 +10,26 @@
 
 #include "frameworkcpp/concurrency.hpp"
 #include "frameworkcpp/reactor/detail/op.hpp"
+#include "frameworkcpp/reactor/reactor_config.hpp"
 
 namespace frameworkcpp::reactor::detail {
 
 static_assert(std::atomic<std::size_t>::is_always_lock_free,
               "the operation ring needs lock-free size_t atomics");
 
-// Cola de operaciones pre-reservadas en arena. El modelo de concurrencia se
-// elige al inicializarla, igual que un bucket de arena:
+// Cola de operaciones pre-reservadas en arena. El modelo se elige al
+// inicializarla y tiene dos ejes independientes:
 //
-//   single_thread_ -> un productor y un consumidor, sin sincronizacion.
-//   lock_free_     -> varios productores y varios consumidores, sin locks.
-//   thread_safe_   -> varios productores y consumidores, serializados por mutex.
+//   producers_: cuantos hilos empujan. single_thread_ usa el camino serial;
+//   lock_free_ usa CAS; thread_safe_ serializa solo a los productores con un
+//   mutex, sin tocar el consumo.
 //
-// La capacidad debe ser potencia de dos. Para lock_free_ cada slot necesita
-// una secuencia propia (Vyukov) que se reserva junto a la cola.
+//   consumers_: cuantos hilos consumen. Hoy el reactor solo soporta
+//   single_thread_ porque cada queue tiene un event loop; el campo se valida
+//   para que el contrato no mienta.
+//
+// La capacidad debe ser potencia de dos. Para producers_ == lock_free_ cada
+// slot necesita una secuencia propia (Vyukov) que se reserva junto a la cola.
 class op_queue_t {
   std::atomic<std::size_t> head_{0};
   std::atomic<std::size_t> tail_{0};
@@ -32,8 +37,8 @@ class op_queue_t {
   std::size_t mask_{0};
   op_t **slots_ = nullptr;
   std::atomic<std::size_t> *sequence_ = nullptr;
-  concurrency_model_t model_ = concurrency_model_t::single_thread_;
-  mutable std::mutex mutex_;
+  queue_concurrency_t concurrency_ = {};
+  mutable std::mutex producer_mutex_;
 
   public:
   op_queue_t() = default;
@@ -48,7 +53,11 @@ class op_queue_t {
   bool init(op_t **slots,
             std::atomic<std::size_t> *sequence,
             std::size_t capacity,
-            concurrency_model_t model) noexcept;
+            queue_concurrency_t concurrency) noexcept;
+
+  // Cambia el contrato de una cola vacia. La usa get_or_create cuando el
+  // usuario pide un modelo por queue distinto del default del reactor.
+  bool set_concurrency(queue_concurrency_t concurrency) noexcept;
 
   // Push un op. Devuelve false si la cola está llena (backpressure).
   bool push(op_t *op) noexcept;
@@ -57,7 +66,7 @@ class op_queue_t {
   op_t *pop() noexcept;
 
   [[nodiscard]] std::size_t size() const noexcept;
-  [[nodiscard]] concurrency_model_t get_concurrency_model() const noexcept { return model_; }
+  [[nodiscard]] queue_concurrency_t get_concurrency() const noexcept { return concurrency_; }
 
   private:
   bool push_serial(op_t *op) noexcept;
@@ -69,16 +78,53 @@ class op_queue_t {
 inline bool op_queue_t::init(op_t **slots,
                              std::atomic<std::size_t> *sequence,
                              std::size_t capacity,
-                             concurrency_model_t model) noexcept {
+                             queue_concurrency_t concurrency) noexcept {
   if (slots == nullptr || capacity == 0 || (capacity & (capacity - 1)) != 0)
     return false;
-  if (model == concurrency_model_t::lock_free_ && sequence == nullptr)
+  // Cada queue tiene un solo event loop. Aceptar otro consumidor seria
+  // prometer algo que el ring de io_uring, el heap de timers y los strands no
+  // cumplen todavia.
+  if (concurrency.consumers_ != concurrency_model_t::single_thread_)
+    return false;
+  switch (concurrency.producers_) {
+  case concurrency_model_t::single_thread_:
+  case concurrency_model_t::lock_free_:
+  case concurrency_model_t::thread_safe_:
+    break;
+  default:
+    return false;
+  }
+  if (concurrency.producers_ == concurrency_model_t::lock_free_ && sequence == nullptr)
     return false;
   slots_ = slots;
   sequence_ = sequence;
   capacity_ = capacity;
   mask_ = capacity - 1;
-  model_ = model;
+  concurrency_ = concurrency;
+  head_.store(0, std::memory_order_relaxed);
+  tail_.store(0, std::memory_order_relaxed);
+  if (sequence_ != nullptr) {
+    for (std::size_t _index = 0; _index < capacity_; ++_index)
+      ::new (static_cast<void *>(sequence_ + _index)) std::atomic<std::size_t>(_index);
+  }
+  return true;
+}
+
+inline bool op_queue_t::set_concurrency(queue_concurrency_t concurrency) noexcept {
+  if (slots_ == nullptr || capacity_ == 0 ||
+      concurrency.consumers_ != concurrency_model_t::single_thread_)
+    return false;
+  switch (concurrency.producers_) {
+  case concurrency_model_t::single_thread_:
+  case concurrency_model_t::lock_free_:
+  case concurrency_model_t::thread_safe_:
+    break;
+  default:
+    return false;
+  }
+  if (concurrency.producers_ == concurrency_model_t::lock_free_ && sequence_ == nullptr)
+    return false;
+  concurrency_ = concurrency;
   head_.store(0, std::memory_order_relaxed);
   tail_.store(0, std::memory_order_relaxed);
   if (sequence_ != nullptr) {
@@ -155,13 +201,15 @@ inline op_t *op_queue_t::pop_lock_free() noexcept {
 }
 
 inline bool op_queue_t::push(op_t *op) noexcept {
-  switch (model_) {
+  switch (concurrency_.producers_) {
   case concurrency_model_t::single_thread_:
     return push_serial(op);
   case concurrency_model_t::lock_free_:
     return push_lock_free(op);
   case concurrency_model_t::thread_safe_: {
-    const std::lock_guard _lock_k{mutex_};
+    // Solo el lado productor toma el lock: el consumidor unico sigue usando
+    // el camino serial. Asi thread_safe_ no serializa la cola entera.
+    const std::lock_guard _lock_k{producer_mutex_};
     return push_serial(op);
   }
   }
@@ -169,22 +217,20 @@ inline bool op_queue_t::push(op_t *op) noexcept {
 }
 
 inline op_t *op_queue_t::pop() noexcept {
-  switch (model_) {
+  switch (concurrency_.producers_) {
   case concurrency_model_t::single_thread_:
     return pop_serial();
   case concurrency_model_t::lock_free_:
     return pop_lock_free();
-  case concurrency_model_t::thread_safe_: {
-    const std::lock_guard _lock_k{mutex_};
+  case concurrency_model_t::thread_safe_:
     return pop_serial();
-  }
   }
   return nullptr;
 }
 
 inline std::size_t op_queue_t::size() const noexcept {
-  if (model_ == concurrency_model_t::thread_safe_) {
-    const std::lock_guard _lock_k{mutex_};
+  if (concurrency_.producers_ == concurrency_model_t::thread_safe_) {
+    const std::lock_guard _lock_k{producer_mutex_};
     return tail_.load(std::memory_order_acquire) - head_.load(std::memory_order_acquire);
   }
   return tail_.load(std::memory_order_acquire) - head_.load(std::memory_order_acquire);
