@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "frameworkcpp/concurrency.hpp"
 #include "frameworkcpp/reactor/detail/op.hpp"
 
 namespace frameworkcpp::reactor::detail {
@@ -20,6 +21,7 @@ class strand_t {
   std::atomic<op_t *> head_{nullptr};
   std::atomic<op_t *> tail_{nullptr};
   std::atomic<bool> busy_{false};
+  concurrency_model_t model_ = concurrency_model_t::single_thread_;
 
   public:
   strand_t() = default;
@@ -64,6 +66,10 @@ class strand_t {
   [[nodiscard]] bool empty() const noexcept {
     return head_.load(std::memory_order_acquire) == nullptr;
   }
+
+  void set_concurrency_model(concurrency_model_t model) noexcept { model_ = model; }
+
+  [[nodiscard]] concurrency_model_t get_concurrency_model() const noexcept { return model_; }
 }; // class strand_t
 
 } // namespace frameworkcpp::reactor::detail

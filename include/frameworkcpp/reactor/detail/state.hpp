@@ -32,7 +32,8 @@ struct queue_control_t {
   op_queue_t op_queue_;
   strand_t *strands_ = nullptr; // segmento propio de la queue
   std::size_t num_strands_ = 0;
-  op_t *ops_segment_ = nullptr; // segmento propio de operaciones
+  std::atomic<std::size_t> next_strand_{0}; // claves repartidas por create_strand
+  op_t *ops_segment_ = nullptr;             // segmento propio de operaciones
   std::size_t ops_segment_size_ = 0;
   op_t *timers_segment_ = nullptr; // segmento propio de timers
   std::size_t timers_segment_size_ = 0;

@@ -922,5 +922,142 @@ TEST(reactor_test_t, ClosingASocketWithAReadPendingReleasesTheSlot) {
   ::close(_third_fds[1]);
 }
 
+struct count_context_t {
+  std::atomic<std::size_t> fired_{0};
+}; // struct count_context_t
+
+void on_count(void *ctx, const op_result_t &result) {
+  (void) result;
+  static_cast<count_context_t *>(ctx)->fired_.fetch_add(1, std::memory_order_relaxed);
+}
+
+reactor_config_t make_concurrency_config(concurrency_model_t model) {
+  reactor_config_t _config;
+  _config.queues_ = 1;
+  _config.max_jobs_per_queue_ = 128;
+  _config.max_sockets_ = 8;
+  _config.max_strands_ = 8;
+  _config.max_timers_per_queue_ = 8;
+  _config.affinity_ = false;
+  _config.concurrency_ = model;
+  return _config;
+}
+
+void run_concurrent_posts(concurrency_model_t model) {
+  constexpr std::size_t _producer_count_k = 4;
+  constexpr std::size_t _posts_per_producer_k = 250;
+  constexpr std::size_t _expected_k = _producer_count_k * _posts_per_producer_k;
+
+  auto _arena_config =
+      make_arena_config(arena::round_to_page(precompute(make_concurrency_config(model))));
+  arena::arena_t _arena{_arena_config};
+  reactor_t _reactor;
+  ASSERT_TRUE(_reactor.bind_arena(_arena, make_concurrency_config(model)));
+
+  auto *_queue = _reactor.get_or_create("producers");
+  ASSERT_NE(_queue, nullptr);
+  EXPECT_EQ(_queue->get_concurrency_model(), model);
+  EXPECT_EQ(_reactor.get_concurrency_model(), model);
+
+  count_context_t _context;
+  _reactor.run_all();
+
+  std::vector<std::thread> _producers;
+  _producers.reserve(_producer_count_k);
+  for (std::size_t _producer = 0; _producer < _producer_count_k; ++_producer) {
+    _producers.emplace_back([_queue, &_context] {
+      for (std::size_t _index = 0; _index < _posts_per_producer_k; ++_index) {
+        while (!_queue->post(op_kind_t::custom_, -1, nullptr, 0, on_count, &_context))
+          std::this_thread::yield();
+      }
+    });
+  }
+  for (auto &_producer : _producers)
+    _producer.join();
+
+  const auto _deadline_k = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+  while (_context.fired_.load(std::memory_order_acquire) < _expected_k &&
+         std::chrono::steady_clock::now() < _deadline_k)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  _reactor.stop_all();
+
+  EXPECT_EQ(_context.fired_.load(std::memory_order_acquire), _expected_k);
+}
+
+TEST(reactor_test_t, LockFreeQueueSurvivesConcurrentProducers) {
+  run_concurrent_posts(concurrency_model_t::lock_free_);
+}
+
+TEST(reactor_test_t, ThreadSafeQueueSurvivesConcurrentProducers) {
+  run_concurrent_posts(concurrency_model_t::thread_safe_);
+}
+
+TEST(reactor_test_t, SingleThreadQueueRunsOnTheCallerThread) {
+  const reactor_config_t _config_k = make_concurrency_config(concurrency_model_t::single_thread_);
+
+  auto _arena_config = make_arena_config(arena::round_to_page(precompute(_config_k)));
+  arena::arena_t _arena{_arena_config};
+  reactor_t _reactor;
+  ASSERT_TRUE(_reactor.bind_arena(_arena, _config_k));
+
+  auto *_queue = _reactor.get_or_create("inline");
+  ASSERT_NE(_queue, nullptr);
+
+  count_context_t _context;
+  std::thread _runner([_queue] { _queue->run(); });
+  for (std::size_t _index = 0; _index < 64; ++_index) {
+    while (!_queue->post(op_kind_t::custom_, -1, nullptr, 0, on_count, &_context))
+      std::this_thread::yield();
+  }
+
+  const auto _deadline_k = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+  while (_context.fired_.load(std::memory_order_acquire) < 64 &&
+         std::chrono::steady_clock::now() < _deadline_k)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  _queue->stop();
+  _runner.join();
+
+  EXPECT_EQ(_context.fired_.load(std::memory_order_acquire), 64U);
+}
+
+TEST(reactor_test_t, StrandsCarryTheirOwnConcurrencyModel) {
+  const reactor_config_t _config_k = make_concurrency_config(concurrency_model_t::single_thread_);
+
+  auto _arena_config = make_arena_config(arena::round_to_page(precompute(_config_k)));
+  arena::arena_t _arena{_arena_config};
+  reactor_t _reactor;
+  ASSERT_TRUE(_reactor.bind_arena(_arena, _config_k));
+
+  auto *_queue = _reactor.get_or_create("strands");
+  ASSERT_NE(_queue, nullptr);
+
+  const strand_t _shared_k = _reactor.create_strand(_queue, concurrency_model_t::thread_safe_);
+  ASSERT_TRUE(_shared_k);
+  EXPECT_EQ(_shared_k.get_concurrency_model(), concurrency_model_t::thread_safe_);
+  EXPECT_EQ(_shared_k.queue(), _queue);
+
+  const strand_t _inherited_k = _reactor.create_strand(_queue);
+  ASSERT_TRUE(_inherited_k);
+  EXPECT_EQ(_inherited_k.get_concurrency_model(), concurrency_model_t::single_thread_);
+
+  for (std::size_t _index = 2; _index < _config_k.max_strands_; ++_index)
+    EXPECT_TRUE(_reactor.create_strand(_queue, concurrency_model_t::lock_free_));
+  EXPECT_FALSE(_reactor.create_strand(_queue, concurrency_model_t::lock_free_));
+}
+
+TEST(reactor_test_t, RejectsUnsupportedQueueConfiguration) {
+  auto _arena_config = make_arena_config(64 * 1024);
+  arena::arena_t _arena{_arena_config};
+  reactor_t _reactor;
+
+  reactor_config_t _workers = make_concurrency_config(concurrency_model_t::lock_free_);
+  _workers.workers_per_queue_ = 2;
+  EXPECT_FALSE(_reactor.bind_arena(_arena, _workers));
+
+  reactor_config_t _non_pow2 = make_concurrency_config(concurrency_model_t::lock_free_);
+  _non_pow2.max_jobs_per_queue_ = 100;
+  EXPECT_FALSE(_reactor.bind_arena(_arena, _non_pow2));
+}
+
 } // namespace
 } // namespace frameworkcpp::reactor

@@ -94,6 +94,28 @@ auto *ingest = reactor.get_or_create("ingest");
 auto *same   = reactor.get_or_create("ingest");   // ingest == same
 ```
 
+## create_strand
+
+```cpp
+strand_t create_strand(queue_t *queue, concurrency_model_t concurrency) noexcept;
+strand_t create_strand(queue_t *queue) noexcept;   // inherits the queue's model
+```
+
+Creates a serialisation key owned by `queue` and records the concurrency model
+the caller promises for it. Operations sharing `strand.id()` on the same queue
+never run at the same time. The no-argument overload copies the queue's model.
+
+- Returns an invalid strand when the reactor is not bound, the queue is null, or
+  `max_strands_` keys have already been created.
+- The model is a declaration, not a runtime switch: `single_thread_` says the
+  strand is used from one thread, `lock_free_` says it may be shared without a
+  lock, and `thread_safe_` says the caller will serialise it.
+
+```cpp
+auto strand = reactor.create_strand(queue, concurrency_model_t::lock_free_);
+socket.recv(buffer, sizeof(buffer), on_read, &state, strand.id());
+```
+
 ## create_socket
 
 ```cpp
@@ -340,6 +362,18 @@ reactor.run_all();
 // ... serve ...
 reactor.stop_all();
 ```
+
+A queue can also be driven on the caller's thread:
+
+```cpp
+void queue_t::run() noexcept;   // blocks until the queue is stopped
+void queue_t::stop() noexcept;
+```
+
+`queue_t::run` serves that queue in the calling thread and returns once `stop`
+has been requested. `run_all` uses it internally. This is how a
+`single_thread_` reactor is run when you do not want a thread per queue. Do not
+drive a queue with `run` while `run_all` already owns it.
 
 ## The result
 

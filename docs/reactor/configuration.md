@@ -7,25 +7,51 @@ out of an arena.
 ```cpp
 struct reactor_config_t {
     std::size_t queues_ = 1;                 // named event loops
-    std::size_t workers_per_queue_ = 1;      // threads per queue
     std::size_t max_jobs_per_queue_ = 1024;  // operations in flight per queue
     std::size_t max_sockets_ = 4096;         // registered sockets
     std::size_t max_strands_ = 4096;         // serialisation keys
     std::size_t max_timers_per_queue_ = 256; // pending timers per queue
     bool affinity_ = false;                  // pin each queue to its own core
+    backend_t backend_ = backend_t::auto_;   // io_uring, epoll or auto
+    concurrency_model_t concurrency_ = concurrency_model_t::lock_free_;
+    std::size_t workers_per_queue_ = 1;      // must be 1 today
 };
 ```
 
 | Field | What it bounds | Notes |
 | --- | --- | --- |
 | `queues_` | Number of named event loops. | Each one gets its own `io_uring` ring and its own thread. |
-| `workers_per_queue_` | Threads per queue. | One thread per queue is the current model; the knob is reserved. |
-| `max_jobs_per_queue_` | Operations in flight per queue. | The operation pool. When it is empty, `post` returns `false`. |
+| `workers_per_queue_` | Threads per queue. | One thread per queue is the only supported value; `bind_arena` rejects anything else. |
+| `max_jobs_per_queue_` | Operations in flight per queue. | The operation pool. When it is empty, `post` returns `false`. Must be a power of two. |
 | `max_sockets_` | Registered sockets. | A socket table entry is small, but the table is fixed. |
 | `max_strands_` | Distinct strand keys. | Strands are addressed modulo this number. |
 | `max_timers_per_queue_` | Pending timers per queue. | A queue's timers live in their own pool, so a full timer pool never starves the I/O pool. |
 | `affinity_` | Whether queues are pinned to a core. | Queue *n* is pinned to CPU *n*. The pin is best-effort. |
 | `backend_` | Which event backend to use. | `auto_` picks `io_uring` when the kernel has it, `epoll` otherwise. |
+| `concurrency_` | How a queue's operation ring is shared. | `single_thread_`, `lock_free_` or `thread_safe_`. See below. |
+
+## Choosing the concurrency model
+
+Every queue is created with one model, and that model does not change:
+
+| Model | Producer/consumer contract | Cost |
+| --- | --- | --- |
+| `single_thread_` | One thread posts and the queue's thread consumes. | plain loads and stores |
+| `lock_free_` | Any number of threads post and consume. | atomics only |
+| `thread_safe_` | Any number of threads post and consume. | one mutex per queue |
+
+The default is `lock_free_`, because the public API lets any thread post an
+operation. Drop to `single_thread_` only when you can prove one producer per
+queue; it skips the compare-exchange on every post. Use `thread_safe_` when you
+want correctness with the simplest possible implementation, or while debugging.
+
+Strands carry their own model too. `create_strand(queue, model)` makes the
+contract explicit; the no-argument overload inherits the queue's model. The
+model is a declaration of how the key is used, not a runtime switch: today each
+queue has one consumer, so operations on any strand are already serialised. The
+declaration still matters because it documents intent and is enforced when
+queues grow more than one consumer. A strand may be stronger than its queue —
+for example a `thread_safe_` strand on a `single_thread_` queue.
 
 ## Choosing a backend
 
