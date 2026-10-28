@@ -39,6 +39,7 @@ class op_queue_t {
   std::atomic<std::size_t> *sequence_ = nullptr;
   queue_concurrency_t concurrency_ = {};
   mutable std::mutex producer_mutex_;
+  mutable std::mutex consumer_mutex_;
 
   public:
   op_queue_t() = default;
@@ -73,6 +74,10 @@ class op_queue_t {
   op_t *pop_serial() noexcept;
   bool push_lock_free(op_t *op) noexcept;
   op_t *pop_lock_free() noexcept;
+  [[nodiscard]] bool uses_lock_free_ring() const noexcept {
+    return concurrency_.producers_ == concurrency_model_t::lock_free_ ||
+           concurrency_.consumers_ == concurrency_model_t::lock_free_;
+  }
 }; // class op_queue_t
 
 inline bool op_queue_t::init(op_t **slots,
@@ -80,11 +85,6 @@ inline bool op_queue_t::init(op_t **slots,
                              std::size_t capacity,
                              queue_concurrency_t concurrency) noexcept {
   if (slots == nullptr || capacity == 0 || (capacity & (capacity - 1)) != 0)
-    return false;
-  // Cada queue tiene un solo event loop. Aceptar otro consumidor seria
-  // prometer algo que el ring de io_uring, el heap de timers y los strands no
-  // cumplen todavia.
-  if (concurrency.consumers_ != concurrency_model_t::single_thread_)
     return false;
   switch (concurrency.producers_) {
   case concurrency_model_t::single_thread_:
@@ -94,7 +94,17 @@ inline bool op_queue_t::init(op_t **slots,
   default:
     return false;
   }
-  if (concurrency.producers_ == concurrency_model_t::lock_free_ && sequence == nullptr)
+  switch (concurrency.consumers_) {
+  case concurrency_model_t::single_thread_:
+  case concurrency_model_t::lock_free_:
+  case concurrency_model_t::thread_safe_:
+    break;
+  default:
+    return false;
+  }
+  if ((concurrency.producers_ == concurrency_model_t::lock_free_ ||
+       concurrency.consumers_ == concurrency_model_t::lock_free_) &&
+      sequence == nullptr)
     return false;
   slots_ = slots;
   sequence_ = sequence;
@@ -111,8 +121,7 @@ inline bool op_queue_t::init(op_t **slots,
 }
 
 inline bool op_queue_t::set_concurrency(queue_concurrency_t concurrency) noexcept {
-  if (slots_ == nullptr || capacity_ == 0 ||
-      concurrency.consumers_ != concurrency_model_t::single_thread_)
+  if (slots_ == nullptr || capacity_ == 0)
     return false;
   switch (concurrency.producers_) {
   case concurrency_model_t::single_thread_:
@@ -122,7 +131,17 @@ inline bool op_queue_t::set_concurrency(queue_concurrency_t concurrency) noexcep
   default:
     return false;
   }
-  if (concurrency.producers_ == concurrency_model_t::lock_free_ && sequence_ == nullptr)
+  switch (concurrency.consumers_) {
+  case concurrency_model_t::single_thread_:
+  case concurrency_model_t::lock_free_:
+  case concurrency_model_t::thread_safe_:
+    break;
+  default:
+    return false;
+  }
+  if ((concurrency.producers_ == concurrency_model_t::lock_free_ ||
+       concurrency.consumers_ == concurrency_model_t::lock_free_) &&
+      sequence_ == nullptr)
     return false;
   concurrency_ = concurrency;
   head_.store(0, std::memory_order_relaxed);
@@ -201,38 +220,26 @@ inline op_t *op_queue_t::pop_lock_free() noexcept {
 }
 
 inline bool op_queue_t::push(op_t *op) noexcept {
-  switch (concurrency_.producers_) {
-  case concurrency_model_t::single_thread_:
-    return push_serial(op);
-  case concurrency_model_t::lock_free_:
-    return push_lock_free(op);
-  case concurrency_model_t::thread_safe_: {
-    // Solo el lado productor toma el lock: el consumidor unico sigue usando
-    // el camino serial. Asi thread_safe_ no serializa la cola entera.
-    const std::lock_guard _lock_k{producer_mutex_};
-    return push_serial(op);
-  }
-  }
-  return false;
+  std::unique_lock<std::mutex> _lock_k{producer_mutex_, std::defer_lock};
+  if (concurrency_.producers_ == concurrency_model_t::thread_safe_)
+    _lock_k.lock();
+  return uses_lock_free_ring() ? push_lock_free(op) : push_serial(op);
 }
 
 inline op_t *op_queue_t::pop() noexcept {
-  switch (concurrency_.producers_) {
-  case concurrency_model_t::single_thread_:
-    return pop_serial();
-  case concurrency_model_t::lock_free_:
-    return pop_lock_free();
-  case concurrency_model_t::thread_safe_:
-    return pop_serial();
-  }
-  return nullptr;
+  std::unique_lock<std::mutex> _lock_k{consumer_mutex_, std::defer_lock};
+  if (concurrency_.consumers_ == concurrency_model_t::thread_safe_)
+    _lock_k.lock();
+  return uses_lock_free_ring() ? pop_lock_free() : pop_serial();
 }
 
 inline std::size_t op_queue_t::size() const noexcept {
-  if (concurrency_.producers_ == concurrency_model_t::thread_safe_) {
-    const std::lock_guard _lock_k{producer_mutex_};
-    return tail_.load(std::memory_order_acquire) - head_.load(std::memory_order_acquire);
-  }
+  std::unique_lock<std::mutex> _producer_lock_k{producer_mutex_, std::defer_lock};
+  std::unique_lock<std::mutex> _consumer_lock_k{consumer_mutex_, std::defer_lock};
+  if (concurrency_.producers_ == concurrency_model_t::thread_safe_)
+    _producer_lock_k.lock();
+  if (concurrency_.consumers_ == concurrency_model_t::thread_safe_)
+    _consumer_lock_k.lock();
   return tail_.load(std::memory_order_acquire) - head_.load(std::memory_order_acquire);
 }
 

@@ -85,7 +85,7 @@ The reactor has three kinds of state and each one has a single owner:
 | --- | --- | --- |
 | Operation pool | anyone | a compare-exchange takes a free operation, so two threads posting at once never take the same one |
 | Timer heap | the queue's thread | a timer is scheduled by queueing an operation; the thread puts it in the heap |
-| Socket slots | the queue's thread | the pending operation, the close flag and the closed flag are atomics |
+| Socket slots | the queue's thread | the descriptor, the pending operation, the close flag and the closed flag are atomics |
 
 That is why the timer heap needs no lock and the operation pool needs no
 mutex: the heap is touched by one thread, and the pool hands out operations
@@ -97,6 +97,12 @@ descriptor: it queues a request, and the queue's thread closes it once no
 operation is in flight for that socket. Closing a descriptor from the caller's
 thread while the queue is using it would be a race on the file descriptor, and
 it would leave the pending operation without an owner.
+
+The descriptor inside the slot is atomic, because the slot outlives the close:
+the queue's thread publishes `-1` when it releases the slot, and the thread
+that registers a socket takes a free slot with a compare-exchange. A slot
+freed by the queue can therefore be reused by another registration without the
+two threads racing on the same field.
 
 ## The strand protocol
 
@@ -168,7 +174,7 @@ operations:
 
 ```cpp
 struct socket_slot_t {
-  int fd_ = -1;
+  std::atomic<int> fd_{-1};
   queue_t *queue_ = nullptr;
   std::uint64_t socket_id_ = 0;
   std::atomic<std::uint32_t> inflight_{0};

@@ -302,19 +302,20 @@ class reactor_t {
 
   private:
   static void execute_op(detail::queue_control_t *qc, detail::op_t *op) noexcept;
-  static void complete_op(detail::queue_control_t *qc, struct io_uring_cqe *cqe) noexcept;
+  static void complete_op(detail::queue_control_t *qc, std::size_t op_index, long result) noexcept;
   static void execute_io_uring_op(detail::queue_control_t *qc, detail::op_t *op) noexcept;
   static void arm_epoll_op(detail::queue_control_t *qc, detail::op_t *op) noexcept;
   static void run_epoll_op(detail::queue_control_t *qc, detail::op_t *op) noexcept;
   static void handle_epoll_event(detail::queue_control_t *qc,
                                  const struct epoll_event &event) noexcept;
   static void expire_timers(detail::queue_control_t *qc) noexcept;
-  void run_queue(std::size_t index) const noexcept;
+  void run_queue(std::size_t index, std::size_t worker) const noexcept;
   std::uint64_t next_timer_id() noexcept;
 
   detail::reactor_state_t state_{};
   std::atomic<std::uint64_t> timer_id_{1};
   queue_concurrency_t concurrency_ = {};
+  std::size_t workers_per_queue_ = 1;
   bool bound_ = false;
   bool affinity_ = false;
 }; // class reactor_t
@@ -364,8 +365,9 @@ constexpr void make_specs(const reactor_config_t &config,
               sizeof(detail::op_t *) * _total_timers_k,
               alignof(detail::op_t *),
               1};
+  const std::size_t _total_events_k = _total_ops_k * config.workers_per_queue_;
   specs[8] = {reactor_shard_tag_k + 8,
-              sizeof(struct epoll_event) * _total_ops_k,
+              sizeof(struct epoll_event) * _total_events_k,
               alignof(struct epoll_event),
               1};
   specs[9] = {reactor_shard_tag_k + 9,

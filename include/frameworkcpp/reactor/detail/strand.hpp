@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <mutex>
 #include <thread>
 
 #include "frameworkcpp/concurrency.hpp"
@@ -25,6 +26,8 @@ class strand_t {
   std::atomic<op_t *> tail_{nullptr};
   std::atomic<bool> busy_{false};
   concurrency_model_t model_ = concurrency_model_t::single_thread_;
+  mutable std::mutex mutex_;
+  bool shared_ = false;
 #ifndef NDEBUG
   std::atomic<bool> producer_claimed_{false};
   std::atomic<std::uint64_t> producer_thread_{0};
@@ -40,39 +43,43 @@ class strand_t {
 
   // Agrega un op al final de la lista del strand.
   void enqueue(op_t *op) noexcept {
-    op->next_ = nullptr;
-    op_t *_prev_k = tail_.exchange(op, std::memory_order_acq_rel);
-    if (_prev_k == nullptr)
-      head_.store(op, std::memory_order_release);
-    else
-      _prev_k->next_ = op;
+    if (shared_) {
+      const std::lock_guard _lock_k{mutex_};
+      enqueue_locked(op);
+      return;
+    }
+    enqueue_locked(op);
   }
 
   // Extrae el op del frente solo si el strand está libre. Devuelve nullptr si
   // está ocupado o vacío.
   op_t *try_dispatch() noexcept {
-    if (busy_.load(std::memory_order_acquire))
-      return nullptr;
-    op_t *_head_k = head_.load(std::memory_order_acquire);
-    if (_head_k == nullptr)
-      return nullptr;
-    op_t *_next_k = _head_k->next_;
-    if (!head_.compare_exchange_strong(
-            _head_k, _next_k, std::memory_order_acq_rel, std::memory_order_acquire))
-      return nullptr;
-    if (_next_k == nullptr)
-      tail_.store(nullptr, std::memory_order_release);
-    _head_k->next_ = nullptr;
-    busy_.store(true, std::memory_order_release);
-    return _head_k;
+    if (shared_) {
+      const std::lock_guard _lock_k{mutex_};
+      return try_dispatch_locked();
+    }
+    return try_dispatch_locked();
   }
 
   // Libera el strand: la op en vuelo terminó y la siguiente puede arrancar.
-  void release() noexcept { busy_.store(false, std::memory_order_release); }
+  void release() noexcept {
+    if (shared_) {
+      const std::lock_guard _lock_k{mutex_};
+      busy_.store(false, std::memory_order_release);
+      return;
+    }
+    busy_.store(false, std::memory_order_release);
+  }
 
   [[nodiscard]] bool empty() const noexcept {
+    if (shared_) {
+      const std::lock_guard _lock_k{mutex_};
+      return head_.load(std::memory_order_acquire) == nullptr;
+    }
     return head_.load(std::memory_order_acquire) == nullptr;
   }
+
+  void set_shared(bool shared) noexcept { shared_ = shared; }
 
   void set_concurrency_model(concurrency_model_t model) noexcept { model_ = model; }
 
@@ -93,6 +100,33 @@ class strand_t {
     assert(producer_thread_.load(std::memory_order_acquire) == _token_k &&
            "single_thread_ strand posted from more than one thread");
 #endif
+  }
+
+  private:
+  void enqueue_locked(op_t *op) noexcept {
+    op->next_ = nullptr;
+    op_t *_prev_k = tail_.exchange(op, std::memory_order_acq_rel);
+    if (_prev_k == nullptr)
+      head_.store(op, std::memory_order_release);
+    else
+      _prev_k->next_ = op;
+  }
+
+  op_t *try_dispatch_locked() noexcept {
+    if (busy_.load(std::memory_order_acquire))
+      return nullptr;
+    op_t *_head_k = head_.load(std::memory_order_acquire);
+    if (_head_k == nullptr)
+      return nullptr;
+    op_t *_next_k = _head_k->next_;
+    if (!head_.compare_exchange_strong(
+            _head_k, _next_k, std::memory_order_acq_rel, std::memory_order_acquire))
+      return nullptr;
+    if (_next_k == nullptr)
+      tail_.store(nullptr, std::memory_order_release);
+    _head_k->next_ = nullptr;
+    busy_.store(true, std::memory_order_release);
+    return _head_k;
   }
 }; // class strand_t
 

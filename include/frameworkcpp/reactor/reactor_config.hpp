@@ -13,6 +13,9 @@ namespace frameworkcpp::reactor {
 // Número máximo de colas nombradas soportado por un reactor.
 inline constexpr std::size_t max_reactor_queues_k = 64;
 
+// Número máximo de workers (hilos de evento) por queue.
+inline constexpr std::size_t max_workers_per_queue_k = 16;
+
 // Número máximo de sockets registrados por reactor.
 inline constexpr std::size_t max_reactor_sockets_k = 4096;
 

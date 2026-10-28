@@ -2,11 +2,15 @@
 
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
 #include <sys/epoll.h>
 #include <thread>
+
+#include "frameworkcpp/reactor/reactor_config.hpp"
 
 #include "frameworkcpp/reactor/detail/epoll_ring.hpp"
 #include "frameworkcpp/reactor/detail/io_uring_ring.hpp"
@@ -41,24 +45,38 @@ struct queue_control_t {
   std::atomic<std::size_t> timers_live_{0};
   socket_slot_t *sockets_ = nullptr;
   std::size_t num_sockets_ = 0;
-  std::thread thread_;
+  std::size_t workers_ = 0;
+  std::array<std::thread, max_workers_per_queue_k> threads_{};
 
   // Backends de eventos. Solo uno está activo por queue.
   epoll_ring_t epoll_;
+  struct epoll_event *events_base_ = nullptr;
+  std::size_t events_per_worker_ = 0;
   timer_wheel_t timers_;
   op_queue_t op_queue_;
   io_uring_ring_t ring_;
   bool use_epoll_ = false;
+
+  // Serializan las estructuras que comparten los workers. Con un solo worker
+  // los caminos no tocan estos mutex.
+  std::mutex submit_mutex_;
+  std::mutex cqe_mutex_;
+  std::mutex state_mutex_;
+  std::mutex timer_mutex_;
 #ifndef NDEBUG
   std::atomic<bool> producer_claimed_{false};
 #endif
   std::atomic<bool> stop_{false};
-  bool running_ = false;
+  std::atomic<bool> running_{false};
   queue_concurrency_t concurrency_ = {};
 }; // struct queue_control_t
 
 struct socket_slot_t {
-  int fd_ = -1;
+  // El descriptor lo escribe el hilo de la queue que lo cierra y lo leen los
+  // hilos que registran sockets. Es atomico para que ese cruce no sea una
+  // carrera de datos: el hilo que cierra publica -1 con release y el que
+  // registra lo toma con acquire.
+  std::atomic<int> fd_{-1};
   queue_t *queue_ = nullptr;
   std::uint64_t socket_id_ = 0;
   // Operaciones en vuelo para este socket. While it is not zero the socket
