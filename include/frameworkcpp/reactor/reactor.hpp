@@ -35,6 +35,8 @@ constexpr std::size_t precompute(const reactor_config_t &config) noexcept;
 // reactor: comparar contra él es la forma de saber si un timer ya venció.
 [[nodiscard]] std::uint64_t monotonic_now_ns() noexcept;
 
+class reactor_t;
+
 // Cola nombrada de eventos. Cada queue tiene su io_uring y su hilo de eventos.
 class queue_t {
   friend class reactor_t;
@@ -46,6 +48,9 @@ class queue_t {
   detail::queue_control_t *control_ = nullptr;
   detail::op_t *ops_segment_ = nullptr;
   std::size_t ops_segment_size_ = 0;
+  queue_concurrency_t concurrency_ = {};
+  reactor_t *owner_ = nullptr;
+  std::size_t index_ = 0;
 
   public:
   queue_t() = default;
@@ -53,6 +58,9 @@ class queue_t {
   [[nodiscard]] explicit operator bool() const noexcept { return id_ != 0; }
 
   [[nodiscard]] std::string_view name() const noexcept { return name_; }
+
+  // Contrato con el que se creo esta queue. No cambia durante su vida.
+  [[nodiscard]] queue_concurrency_t get_concurrency() const noexcept { return concurrency_; }
 
   // Identificador numérico de la queue. Estable durante toda la vida del
   // reactor; 0 si el handle no está ligado a ninguna queue.
@@ -158,10 +166,15 @@ class socket_t {
 }; // class socket_t
 
 // Serializa handlers por clave (fd / connection_id) sin mutex en fast path.
+// El modelo de concurrencia declara como se comparte la clave; a diferencia de
+// un bucket no cambia la implementacion del reactor, pero deja el contrato
+// escrito para cuando una queue tenga varios consumidores.
 class strand_t {
   friend class reactor_t;
 
   std::uint64_t id_ = 0;
+  concurrency_model_t concurrency_ = concurrency_model_t::single_thread_;
+  queue_t *queue_ = nullptr;
 
   public:
   strand_t() = default;
@@ -169,9 +182,15 @@ class strand_t {
   [[nodiscard]] explicit operator bool() const noexcept { return id_ != 0; }
 
   [[nodiscard]] std::uint64_t id() const noexcept { return id_; }
+
+  [[nodiscard]] concurrency_model_t get_concurrency_model() const noexcept { return concurrency_; }
+
+  [[nodiscard]] queue_t *queue() const noexcept { return queue_; }
 }; // struct strand_t
 
 class reactor_t {
+  friend class queue_t;
+
   public:
   reactor_t() = default;
   reactor_t(const reactor_t &) = delete;
@@ -190,8 +209,28 @@ class reactor_t {
   // real está disponible: con epoll no hay io_uring detrás.
   [[nodiscard]] backend_t get_backend() const noexcept;
 
-  // Devuelve la misma queue_t para el mismo nombre (idempotente).
+  // Contrato por defecto que heredan las queues de este reactor.
+  [[nodiscard]] queue_concurrency_t get_concurrency() const noexcept { return concurrency_; }
+
+  // Devuelve la misma queue_t para el mismo nombre (idempotente). Una queue
+  // nueva hereda el contrato por defecto del reactor.
   [[nodiscard]] queue_t *get_or_create(std::string_view name) const noexcept;
+
+  // Igual que el anterior, pero la queue nueva usa `concurrency`. Si el nombre
+  // ya existe con otro contrato, devuelve nullptr: el modelo no cambia en
+  // caliente.
+  [[nodiscard]] queue_t *get_or_create(std::string_view name,
+                                       queue_concurrency_t concurrency) const noexcept;
+
+  // Crea una clave de serializacion propia de `queue` con un modelo explicito.
+  // Devuelve un strand no valido si la queue no existe o se agotaron las
+  // claves. El modelo debe declararse aunque hoy la queue tenga un solo
+  // consumidor: es el contrato que el usuario promete.
+  [[nodiscard]] strand_t create_strand(queue_t *queue,
+                                       concurrency_model_t concurrency) const noexcept;
+
+  // Igual que el anterior, heredando el modelo de la queue.
+  [[nodiscard]] strand_t create_strand(queue_t *queue) const noexcept;
 
   // Registra un fd en una queue. Devuelve un socket no válido si no hay
   // slots libres o la queue es nula.
@@ -263,18 +302,20 @@ class reactor_t {
 
   private:
   static void execute_op(detail::queue_control_t *qc, detail::op_t *op) noexcept;
-  static void complete_op(detail::queue_control_t *qc, struct io_uring_cqe *cqe) noexcept;
+  static void complete_op(detail::queue_control_t *qc, std::size_t op_index, long result) noexcept;
   static void execute_io_uring_op(detail::queue_control_t *qc, detail::op_t *op) noexcept;
   static void arm_epoll_op(detail::queue_control_t *qc, detail::op_t *op) noexcept;
   static void run_epoll_op(detail::queue_control_t *qc, detail::op_t *op) noexcept;
   static void handle_epoll_event(detail::queue_control_t *qc,
                                  const struct epoll_event &event) noexcept;
   static void expire_timers(detail::queue_control_t *qc) noexcept;
-  void run_queue(std::size_t index) const noexcept;
+  void run_queue(std::size_t index, std::size_t worker) const noexcept;
   std::uint64_t next_timer_id() noexcept;
 
   detail::reactor_state_t state_{};
   std::atomic<std::uint64_t> timer_id_{1};
+  queue_concurrency_t concurrency_ = {};
+  std::size_t workers_per_queue_ = 1;
   bool bound_ = false;
   bool affinity_ = false;
 }; // class reactor_t
@@ -324,9 +365,14 @@ constexpr void make_specs(const reactor_config_t &config,
               sizeof(detail::op_t *) * _total_timers_k,
               alignof(detail::op_t *),
               1};
+  const std::size_t _total_events_k = _total_ops_k * config.workers_per_queue_;
   specs[8] = {reactor_shard_tag_k + 8,
-              sizeof(struct epoll_event) * _total_ops_k,
+              sizeof(struct epoll_event) * _total_events_k,
               alignof(struct epoll_event),
+              1};
+  specs[9] = {reactor_shard_tag_k + 9,
+              sizeof(std::atomic<std::size_t>) * _total_ops_k,
+              alignof(std::atomic<std::size_t>),
               1};
 }
 

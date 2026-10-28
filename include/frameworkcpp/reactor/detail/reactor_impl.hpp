@@ -6,10 +6,12 @@
 // los tipos completos de la API pública, por eso no lo incluye él mismo.
 
 #include <atomic>
+#include <cassert>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <fcntl.h>
+#include <functional>
 #include <netinet/in.h>
 #include <new>
 #include <sys/un.h>
@@ -25,6 +27,23 @@
 #include "frameworkcpp/reactor/detail/timer_wheel.hpp"
 
 namespace frameworkcpp::reactor::detail {
+
+#ifndef NDEBUG
+// Contrato, no ceremonia: si una queue promete single_thread_ en el eje
+// productor, el primer post fija el hilo y cualquier otro aborta en debug.
+inline void assert_single_producer(queue_control_t *qc) noexcept {
+  if (qc->concurrency_.producers_ != concurrency_model_t::single_thread_)
+    return;
+  const auto _token_k =
+      static_cast<std::uint64_t>(std::hash<std::thread::id>{}(std::this_thread::get_id()));
+  if (!qc->producer_claimed_.exchange(true, std::memory_order_acq_rel)) {
+    qc->producer_thread_.store(_token_k, std::memory_order_release);
+    return;
+  }
+  assert(qc->producer_thread_.load(std::memory_order_acquire) == _token_k &&
+         "single_thread_ queue posted from more than one thread");
+}
+#endif
 
 // Localiza el slot de un socket por su id. Devuelve nullptr si el id no
 // corresponde a ningún socket registrado.
@@ -50,6 +69,18 @@ inline reactor_t::~reactor_t() {
 inline bool reactor_t::bind_arena(arena::arena_t &arena, const reactor_config_t &config) noexcept {
   if (bound_)
     return false;
+  if (config.queues_ == 0 || config.queues_ > max_reactor_queues_k ||
+      config.max_jobs_per_queue_ == 0 ||
+      (config.max_jobs_per_queue_ & (config.max_jobs_per_queue_ - 1)) != 0 ||
+      config.max_sockets_ == 0 || config.max_strands_ == 0 || config.max_timers_per_queue_ == 0)
+    return false;
+  // Cada queue ejecuta un solo event loop: el ring de io_uring y el heap de
+  // timers no admiten varios consumidores. La perilla se valida para que no
+  // prometa hilos que no existen.
+  if (config.workers_per_queue_ != 1)
+    return false;
+  if (config.concurrency_.consumers_ != concurrency_model_t::single_thread_)
+    return false;
 
   // Si el bind falla, el reactor queda como si nunca se hubiera llamado: un
   // reintento no debe encontrar un estado a medias.
@@ -67,6 +98,7 @@ inline bool reactor_t::bind_arena(arena::arena_t &arena, const reactor_config_t 
     state_.num_strands_ = 0;
     state_.num_timers_ = 0;
     affinity_ = false;
+    concurrency_ = {};
   };
 
   arena::object_spec_t _specs[reactor_spec_count_k] = {};
@@ -112,10 +144,14 @@ inline bool reactor_t::bind_arena(arena::arena_t &arena, const reactor_config_t 
   auto *_events_raw = _shard.allocate_tagged(reactor_shard_tag_k + 8,
                                              sizeof(struct epoll_event) * _total_ops_k,
                                              alignof(struct epoll_event));
+  auto *_sequence_raw = _shard.allocate_tagged(reactor_shard_tag_k + 9,
+                                               sizeof(std::atomic<std::size_t>) * _total_ops_k,
+                                               alignof(std::atomic<std::size_t>));
 
   if (_queues_raw == nullptr || _handles_raw == nullptr || _ops_raw == nullptr ||
       _ring_raw == nullptr || _sockets_raw == nullptr || _strands_raw == nullptr ||
-      _timers_raw == nullptr || _timer_heap_raw == nullptr || _events_raw == nullptr) {
+      _timers_raw == nullptr || _timer_heap_raw == nullptr || _events_raw == nullptr ||
+      _sequence_raw == nullptr) {
     _reset_k();
     return false;
   }
@@ -144,7 +180,7 @@ inline bool reactor_t::bind_arena(arena::arena_t &arena, const reactor_config_t 
 
   for (std::size_t _index = 0; _index < config.max_sockets_; ++_index) {
     new (static_cast<void *>(&state_.sockets_[_index])) detail::socket_slot_t();
-    state_.sockets_[_index].fd_ = -1;
+    state_.sockets_[_index].fd_.store(-1, std::memory_order_relaxed);
   }
 
   for (std::size_t _index = 0; _index < _total_ops_k; ++_index) {
@@ -154,8 +190,17 @@ inline bool reactor_t::bind_arena(arena::arena_t &arena, const reactor_config_t 
 
   for (std::size_t _index = 0; _index < config.queues_; ++_index) {
     new (static_cast<void *>(&state_.queues_[_index])) detail::queue_control_t();
-    state_.queues_[_index].op_queue_.init(&state_.op_ring_[_index * config.max_jobs_per_queue_],
-                                          config.max_jobs_per_queue_);
+    auto *_sequence_k = reinterpret_cast<std::atomic<std::size_t> *>(
+        _sequence_raw + (_index * config.max_jobs_per_queue_ * sizeof(std::atomic<std::size_t>)));
+    if (!state_.queues_[_index].op_queue_.init(
+            &state_.op_ring_[_index * config.max_jobs_per_queue_],
+            _sequence_k,
+            config.max_jobs_per_queue_,
+            config.concurrency_)) {
+      _reset_k();
+      return false;
+    }
+    state_.queues_[_index].concurrency_ = config.concurrency_;
     // Backend de eventos. io_uring es el de performance; epoll es el
     // portable y entra cuando el kernel no expone io_uring.
     const bool _want_io_uring_k = config.backend_ != backend_t::epoll_;
@@ -176,12 +221,14 @@ inline bool reactor_t::bind_arena(arena::arena_t &arena, const reactor_config_t 
       state_.queues_[_index].use_epoll_ = true;
     }
     if (state_.queues_[_index].use_epoll_) {
-      const std::size_t _events_offset_k = _index * config.max_jobs_per_queue_;
-      if (!state_.queues_[_index].epoll_.init(&state_.events_[_events_offset_k],
-                                              config.max_jobs_per_queue_)) {
+      const std::size_t _events_offset_k =
+          _index * config.workers_per_queue_ * config.max_jobs_per_queue_;
+      if (!state_.queues_[_index].epoll_.init()) {
         _reset_k();
         return false;
       }
+      state_.queues_[_index].events_base_ = &state_.events_[_events_offset_k];
+      state_.queues_[_index].events_per_worker_ = config.max_jobs_per_queue_;
     }
     state_.queues_[_index].strands_ = &state_.strands_[_index * config.max_strands_];
     state_.queues_[_index].num_strands_ = config.max_strands_;
@@ -200,9 +247,13 @@ inline bool reactor_t::bind_arena(arena::arena_t &arena, const reactor_config_t 
     state_.queue_handles_[_index].name_ = "";
     state_.queue_handles_[_index].ops_segment_ = state_.queues_[_index].ops_segment_;
     state_.queue_handles_[_index].ops_segment_size_ = config.max_jobs_per_queue_;
+    state_.queue_handles_[_index].concurrency_ = config.concurrency_;
+    state_.queue_handles_[_index].owner_ = this;
+    state_.queue_handles_[_index].index_ = _index;
   }
 
   affinity_ = config.affinity_;
+  concurrency_ = config.concurrency_;
   bound_ = true;
   return true;
 }
@@ -218,19 +269,57 @@ inline backend_t reactor_t::get_backend() const noexcept {
 }
 
 inline queue_t *reactor_t::get_or_create(std::string_view name) const noexcept {
-  if (!bound_)
+  return get_or_create(name, concurrency_);
+}
+
+inline queue_t *reactor_t::get_or_create(std::string_view name,
+                                         queue_concurrency_t concurrency) const noexcept {
+  if (!bound_ || concurrency.consumers_ != concurrency_model_t::single_thread_)
     return nullptr;
   for (std::size_t _index = 0; _index < state_.num_queues_; ++_index) {
-    if (state_.queue_handles_[_index].name_ == name)
-      return &state_.queue_handles_[_index];
+    queue_t *_handle = &state_.queue_handles_[_index];
+    if (_handle->name_ != name)
+      continue;
+    if (_handle->concurrency_.producers_ == concurrency.producers_ &&
+        _handle->concurrency_.consumers_ == concurrency.consumers_)
+      return _handle;
+    return nullptr; // el modelo de una queue no cambia en caliente
   }
   for (std::size_t _index = 0; _index < state_.num_queues_; ++_index) {
-    if (state_.queue_handles_[_index].name_.empty()) {
-      state_.queue_handles_[_index].name_ = name;
-      return &state_.queue_handles_[_index];
-    }
+    queue_t *_handle = &state_.queue_handles_[_index];
+    if (!_handle->name_.empty())
+      continue;
+    detail::queue_control_t *_qc = &state_.queues_[_index];
+    if (!_qc->op_queue_.set_concurrency(concurrency))
+      return nullptr;
+    _qc->concurrency_ = concurrency;
+    _handle->concurrency_ = concurrency;
+    _handle->name_ = name;
+    return _handle;
   }
   return nullptr;
+}
+
+inline strand_t reactor_t::create_strand(queue_t *queue,
+                                         concurrency_model_t concurrency) const noexcept {
+  strand_t _strand{};
+  if (!bound_ || queue == nullptr || queue->control_ == nullptr)
+    return _strand;
+  detail::queue_control_t *_qc = queue->control_;
+  const std::size_t _index_k = _qc->next_strand_.fetch_add(1, std::memory_order_relaxed);
+  if (_index_k >= _qc->num_strands_)
+    return _strand;
+  _qc->strands_[_index_k].set_concurrency_model(concurrency);
+  _strand.id_ = static_cast<std::uint64_t>(_index_k) + 1;
+  _strand.concurrency_ = concurrency;
+  _strand.queue_ = queue;
+  return _strand;
+}
+
+inline strand_t reactor_t::create_strand(queue_t *queue) const noexcept {
+  if (queue == nullptr)
+    return strand_t{};
+  return create_strand(queue, queue->get_concurrency().producers_);
 }
 
 inline socket_t reactor_t::create_socket(int fd, queue_t *queue) const noexcept {
@@ -244,16 +333,21 @@ inline socket_t reactor_t::create_socket(int fd, queue_t *queue) const noexcept 
   if (_flags_k >= 0)
     (void) ::fcntl(fd, F_SETFL, _flags_k | O_NONBLOCK);
   for (std::size_t _index = 0; _index < state_.num_sockets_; ++_index) {
-    if (state_.sockets_[_index].fd_ < 0) {
-      state_.sockets_[_index].fd_ = fd;
-      state_.sockets_[_index].closed_.store(false, std::memory_order_release);
-      state_.sockets_[_index].queue_ = queue;
-      state_.sockets_[_index].socket_id_ = _index + 1;
-      _socket.fd_ = fd;
-      _socket.id_ = state_.sockets_[_index].socket_id_;
-      _socket.queue_ = queue;
-      return _socket;
-    }
+    auto &_slot = state_.sockets_[_index];
+    // El slot se toma con un compare_exchange: el hilo de la queue publica
+    // -1 al cerrar el descriptor y asi dos registros nunca toman el mismo
+    // slot al mismo tiempo.
+    int _expected_k = -1;
+    if (!_slot.fd_.compare_exchange_strong(
+            _expected_k, fd, std::memory_order_acq_rel, std::memory_order_acquire))
+      continue;
+    _slot.closed_.store(false, std::memory_order_release);
+    _slot.queue_ = queue;
+    _slot.socket_id_ = _index + 1;
+    _socket.fd_ = fd;
+    _socket.id_ = _slot.socket_id_;
+    _socket.queue_ = queue;
+    return _socket;
   }
   return _socket;
 }
@@ -420,7 +514,7 @@ inline bool reactor_t::migrate(socket_t &socket, queue_t *target) noexcept {
   if (!bound_ || target == nullptr || socket.id_ == 0)
     return false;
   detail::socket_slot_t *_slot = detail::find_slot(&state_, socket.id_);
-  if (_slot == nullptr || _slot->fd_ < 0)
+  if (_slot == nullptr || _slot->fd_.load(std::memory_order_acquire) < 0)
     return false;
   // Con operaciones en vuelo el socket pertenece a la queue que las atiende:
   // mudarlo ahora dejaría una conexión con dos dueños.
@@ -438,7 +532,8 @@ inline std::size_t reactor_t::get_socket_count(queue_t *queue) const noexcept {
     return 0;
   std::size_t _count = 0;
   for (std::size_t _index = 0; _index < state_.num_sockets_; ++_index) {
-    if (state_.sockets_[_index].fd_ >= 0 && state_.sockets_[_index].queue_ == queue)
+    if (state_.sockets_[_index].fd_.load(std::memory_order_acquire) >= 0 &&
+        state_.sockets_[_index].queue_ == queue)
       ++_count;
   }
   return _count;
@@ -454,7 +549,7 @@ inline std::size_t reactor_t::rebalance() const noexcept {
 
   for (std::size_t _index = 0; _index < state_.num_sockets_; ++_index) {
     const detail::socket_slot_t &_slot = state_.sockets_[_index];
-    if (_slot.fd_ < 0 || _slot.queue_ == nullptr)
+    if (_slot.fd_.load(std::memory_order_acquire) < 0 || _slot.queue_ == nullptr)
       continue;
     const std::uint64_t _queue_id_k = _slot.queue_->id();
     if (_queue_id_k == 0 || _queue_id_k > max_reactor_queues_k)
@@ -479,7 +574,7 @@ inline std::size_t reactor_t::rebalance() const noexcept {
        _index < state_.num_sockets_ && _counts[_busiest] > _counts[_quietest] + 1;
        ++_index) {
     detail::socket_slot_t &_slot = state_.sockets_[_index];
-    if (_slot.fd_ < 0 || _slot.queue_ == nullptr)
+    if (_slot.fd_.load(std::memory_order_acquire) < 0 || _slot.queue_ == nullptr)
       continue;
     if (_slot.queue_->id() != _busiest + 1)
       continue;
@@ -498,8 +593,13 @@ inline void reactor_t::run_all() noexcept {
     return;
   state_.running_.store(true, std::memory_order_release);
   for (std::size_t _index = 0; _index < state_.num_queues_; ++_index) {
-    state_.queues_[_index].running_ = true;
-    state_.queues_[_index].thread_ = std::thread([this, _index]() { this->run_queue(_index); });
+    auto *_qc = &state_.queues_[_index];
+    _qc->stop_.store(false, std::memory_order_release);
+    _qc->running_.store(true, std::memory_order_release);
+    const std::size_t _workers_k = _qc->workers_ == 0 ? 1 : _qc->workers_;
+    _qc->workers_ = _workers_k;
+    for (std::size_t _w = 0; _w < _workers_k; ++_w)
+      _qc->threads_[_w] = std::thread([this, _index, _w]() { this->run_queue(_index, _w); });
   }
 }
 
@@ -555,14 +655,15 @@ inline void update_interest(detail::queue_control_t *qc, detail::socket_slot_t *
     _events |= EPOLLOUT;
   if (_events == slot->interest_)
     return;
+  const int _fd_k = slot->fd_.load(std::memory_order_acquire);
   if (_events == 0) {
     if (slot->interest_ != 0)
-      (void) qc->epoll_.remove(slot->fd_);
+      (void) qc->epoll_.remove(_fd_k);
   } else if (slot->interest_ == 0) {
-    if (!qc->epoll_.add(slot->fd_, _events, slot->socket_id_))
-      (void) qc->epoll_.modify(slot->fd_, _events, slot->socket_id_);
+    if (!qc->epoll_.add(_fd_k, _events, slot->socket_id_))
+      (void) qc->epoll_.modify(_fd_k, _events, slot->socket_id_);
   } else {
-    (void) qc->epoll_.modify(slot->fd_, _events, slot->socket_id_);
+    (void) qc->epoll_.modify(_fd_k, _events, slot->socket_id_);
   }
   slot->interest_ = _events;
 }
@@ -606,8 +707,8 @@ inline void finish_op(
     if (_slot->close_pending_.load(std::memory_order_acquire) &&
         _slot->pending_read_.load(std::memory_order_acquire) == nullptr &&
         _slot->pending_write_.load(std::memory_order_acquire) == nullptr) {
-      ::close(_slot->fd_);
-      _slot->fd_ = -1;
+      ::close(_slot->fd_.load(std::memory_order_acquire));
+      _slot->fd_.store(-1, std::memory_order_release);
       _slot->close_pending_.store(false, std::memory_order_release);
     }
   }
@@ -624,21 +725,17 @@ inline void finish_op(
 
 // --- backend io_uring ---
 
-inline void reactor_t::complete_op(detail::queue_control_t *qc, struct io_uring_cqe *cqe) noexcept {
-  // user_data lleva el índice de la op dentro del segmento de la queue: un
-  // entero, no un puntero, así que no hay cast de entero a puntero.
-  const auto _index_k = static_cast<std::size_t>(cqe->user_data);
-  qc->ring_.cqe_seen(cqe);
-  if (_index_k >= qc->ops_segment_size_)
+inline void
+reactor_t::complete_op(detail::queue_control_t *qc, std::size_t op_index, long result) noexcept {
+  if (op_index >= qc->ops_segment_size_)
     return;
-  auto *_op = &qc->ops_segment_[_index_k];
-  const long _res_k = cqe->res;
+  auto *_op = &qc->ops_segment_[op_index];
   // En accept, el resultado del kernel es el descriptor de la conexión
   // aceptada: es lo que el handler necesita para registrarlo.
   const int _fd_k =
-      (_op->kind_ == op_kind_t::accept_ && _res_k >= 0) ? static_cast<int>(_res_k) : -1;
-  const int _ec_k = (_res_k < 0) ? static_cast<int>(-_res_k) : 0;
-  const auto _bytes_k = (_res_k >= 0) ? static_cast<std::size_t>(_res_k) : 0;
+      (_op->kind_ == op_kind_t::accept_ && result >= 0) ? static_cast<int>(result) : -1;
+  const int _ec_k = (result < 0) ? static_cast<int>(-result) : 0;
+  const auto _bytes_k = (result >= 0) ? static_cast<std::size_t>(result) : 0;
   finish_op(qc, _op, _ec_k, _bytes_k, _fd_k);
 }
 
@@ -892,9 +989,10 @@ inline void reactor_t::execute_op(detail::queue_control_t *qc, detail::op_t *op)
       if (_slot->pending_read_.load(std::memory_order_acquire) == nullptr &&
           _slot->pending_write_.load(std::memory_order_acquire) == nullptr) {
         // No queda nada en vuelo: el descriptor se puede cerrar ya.
-        if (_slot->fd_ >= 0)
-          ::close(_slot->fd_);
-        _slot->fd_ = -1;
+        const int _fd_k = _slot->fd_.load(std::memory_order_acquire);
+        if (_fd_k >= 0)
+          ::close(_fd_k);
+        _slot->fd_.store(-1, std::memory_order_release);
         _slot->close_pending_.store(false, std::memory_order_release);
       }
     }
@@ -958,46 +1056,55 @@ inline int wait_timeout_ms(detail::queue_control_t *qc) noexcept {
   return (_ms_k > 1000ULL) ? 1000 : static_cast<int>(_ms_k);
 }
 
-inline void reactor_t::run_queue(std::size_t index) const noexcept {
+inline void reactor_t::run_queue(std::size_t index, std::size_t worker) const noexcept {
   auto *_qc = &this->state_.queues_[index];
+  const std::size_t _workers_k = _qc->workers_ == 0 ? 1 : _qc->workers_;
   if (affinity_)
-    (void) detail::pin_thread_to_cpu(index);
+    (void) detail::pin_thread_to_cpu((index * _workers_k) + worker);
+  _qc->running_.store(true, std::memory_order_release);
   while (!_qc->stop_.load(std::memory_order_acquire)) {
-    // 1. Desencadenar strands listos: un op por strand, en orden.
     for (std::size_t _strand = 0; _strand < _qc->num_strands_; ++_strand) {
       auto *_strand_op = _qc->strands_[_strand].try_dispatch();
-      if (_strand_op != nullptr)
-        reactor_t::execute_op(_qc, _strand_op);
+      if (_strand_op == nullptr)
+        continue;
+      reactor_t::execute_op(_qc, _strand_op);
+      break;
     }
-
-    // 2. Consumir la cola de ops pendientes.
-    auto *_op = _qc->op_queue_.pop();
+    detail::op_t *_op = _qc->op_queue_.pop();
     if (_op != nullptr) {
-      if (_op->strand_id_ != 0) {
-        const auto _strand_index_k = static_cast<std::size_t>(_op->strand_id_ % _qc->num_strands_);
-        _qc->strands_[_strand_index_k].enqueue(_op);
-      } else {
-        reactor_t::execute_op(_qc, _op);
+      reactor_t::execute_op(_qc, _op);
+      continue;
+    }
+    reactor_t::expire_timers(_qc);
+    if (_qc->use_epoll_) {
+      auto *_events_k = _qc->events_base_ + (worker * _qc->events_per_worker_);
+      const int _count_k =
+          _qc->epoll_.wait(_events_k, _qc->events_per_worker_, wait_timeout_ms(_qc));
+      for (int _i = 0; _i < _count_k; ++_i) {
+        const auto &_ev = _events_k[static_cast<std::size_t>(_i)];
+        detail::socket_slot_t *_slot = nullptr;
+        const std::uint64_t _token_k = _ev.data.u64;
+        if (_token_k >= 1 && _token_k <= _qc->num_sockets_)
+          _slot = &_qc->sockets_[static_cast<std::size_t>(_token_k) - 1];
+        detail::op_t *_op_ev = nullptr;
+        if (_slot != nullptr) {
+          if ((_ev.events & (EPOLLIN | EPOLLHUP | EPOLLERR)) != 0)
+            _op_ev = _slot->pending_read_.load(std::memory_order_acquire);
+          if (_op_ev == nullptr && (_ev.events & (EPOLLOUT | EPOLLHUP | EPOLLERR)) != 0)
+            _op_ev = _slot->pending_write_.load(std::memory_order_acquire);
+        }
+        if (_op_ev == nullptr)
+          continue;
+        reactor_t::run_epoll_op(_qc, _op_ev);
       }
       continue;
     }
-
-    // 3. Expirar los timers vencidos.
-    reactor_t::expire_timers(_qc);
-
-    // 4. Esperar eventos del backend activo.
-    if (_qc->use_epoll_) {
-      const int _count_k = _qc->epoll_.wait(wait_timeout_ms(_qc));
-      for (int _index_k = 0; _index_k < _count_k; ++_index_k)
-        reactor_t::handle_epoll_event(_qc,
-                                      _qc->epoll_.event_at(static_cast<std::size_t>(_index_k)));
-      continue;
-    }
-
     if (!_qc->ring_.is_ready()) {
-      // Sin io_uring no hay completaciones que esperar: la queue solo procesa
-      // timers y operaciones locales. Duerme hasta el proximo deadline.
-      const std::uint64_t _next_k = _qc->timers_.next_deadline();
+      std::uint64_t _next_k = 0;
+      {
+        const std::lock_guard _lock_k{_qc->timer_mutex_};
+        _next_k = _qc->timers_.next_deadline();
+      }
       if (_next_k == 0) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
       } else {
@@ -1007,23 +1114,32 @@ inline void reactor_t::run_queue(std::size_t index) const noexcept {
       }
       continue;
     }
-
-    long _timeout_ns = 1000000L;
-    const std::uint64_t _next_k = _qc->timers_.next_deadline();
-    if (_next_k != 0) {
-      const std::uint64_t _now_k = monotonic_now_ns();
-      if (_next_k > _now_k) {
-        const std::uint64_t _delta_k = _next_k - _now_k;
+    std::size_t _op_index_k = 0;
+    long _res_k = 0;
+    bool _got_k = false;
+    {
+      const std::lock_guard _lock_k{_qc->cqe_mutex_};
+      struct io_uring_cqe *_cqe = nullptr;
+      // La espera se acota a 1 ms: asi el hilo nota el flag de stop aunque no
+      // haya timers ni completaciones pendientes.
+      long _timeout_ns = 1000000L;
+      const std::uint64_t _next_k = _qc->timers_.next_deadline();
+      if (_next_k != 0) {
+        const std::uint64_t _now_k = monotonic_now_ns();
+        const std::uint64_t _delta_k = (_next_k > _now_k) ? (_next_k - _now_k) : 0;
         _timeout_ns = (_delta_k < 1000000ULL) ? static_cast<long>(_delta_k) : 1000000L;
-      } else {
-        _timeout_ns = 0;
+      }
+      if (_qc->ring_.wait_cqe(&_cqe, _timeout_ns)) {
+        _op_index_k = static_cast<std::size_t>(_cqe->user_data);
+        _res_k = _cqe->res;
+        _qc->ring_.cqe_seen(_cqe);
+        _got_k = true;
       }
     }
-    struct io_uring_cqe *_cqe = nullptr;
-    if (_qc->ring_.wait_cqe(&_cqe, _timeout_ns))
-      reactor_t::complete_op(_qc, _cqe);
+    if (_got_k)
+      reactor_t::complete_op(_qc, _op_index_k, _res_k);
   }
-  _qc->running_ = false;
+  _qc->running_.store(false, std::memory_order_release);
 }
 
 inline void reactor_t::stop_all() noexcept {
@@ -1031,9 +1147,12 @@ inline void reactor_t::stop_all() noexcept {
     return;
   state_.running_.store(false, std::memory_order_release);
   for (std::size_t _index = 0; _index < state_.num_queues_; ++_index) {
-    state_.queues_[_index].stop_.store(true, std::memory_order_release);
-    if (state_.queues_[_index].thread_.joinable())
-      state_.queues_[_index].thread_.join();
+    auto *_qc = &state_.queues_[_index];
+    _qc->stop_.store(true, std::memory_order_release);
+    const std::size_t _workers_k = _qc->workers_ == 0 ? 1 : _qc->workers_;
+    for (std::size_t _w = 0; _w < _workers_k; ++_w)
+      if (_qc->threads_[_w].joinable())
+        _qc->threads_[_w].join();
   }
   bound_ = false;
 }
@@ -1053,6 +1172,11 @@ inline bool queue_t::post(op_kind_t kind,
                           std::size_t addr_len) noexcept {
   if (control_ == nullptr || ops_segment_ == nullptr)
     return false;
+#ifndef NDEBUG
+  detail::assert_single_producer(control_);
+  if (strand_id != 0 && control_->num_strands_ != 0)
+    control_->strands_[strand_id % control_->num_strands_].assert_submission_thread();
+#endif
   auto *_op = acquire_op(ops_segment_, ops_segment_size_);
   if (_op != nullptr) {
     {
@@ -1073,15 +1197,27 @@ inline bool queue_t::post(op_kind_t kind,
       }
       _op->result_ = op_result_t{};
       _op->next_ = nullptr;
-      return control_->op_queue_.push(_op);
+      if (!control_->op_queue_.push(_op)) {
+        _op->done_.store(true, std::memory_order_release);
+        return false;
+      }
+      return true;
     }
   }
   return false; // pool de ops de esta queue agotado
 }
 
-inline void queue_t::run() noexcept {}
+inline void queue_t::run() noexcept {
+  if (owner_ == nullptr || control_ == nullptr)
+    return;
+  control_->running_.store(true, std::memory_order_release);
+  owner_->run_queue(index_, 0);
+}
 
-inline void queue_t::stop() noexcept {}
+inline void queue_t::stop() noexcept {
+  if (control_ != nullptr)
+    control_->stop_.store(true, std::memory_order_release);
+}
 
 inline std::size_t queue_t::pending_ops() const noexcept {
   if (control_ == nullptr)

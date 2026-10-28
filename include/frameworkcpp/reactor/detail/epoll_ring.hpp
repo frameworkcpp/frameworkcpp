@@ -19,8 +19,6 @@ namespace frameworkcpp::reactor::detail {
 // memoria: `wait` solo escribe sobre el buffer que ya existe.
 class epoll_ring_t {
   int epoll_fd_ = -1;
-  struct epoll_event *events_ = nullptr;
-  std::size_t capacity_ = 0;
 
   public:
   epoll_ring_t() = default;
@@ -36,15 +34,11 @@ class epoll_ring_t {
 
   // Pre-reserva el array de eventos en arena. `capacity` es la cantidad de
   // eventos que una espera puede devolver a la vez.
-  [[nodiscard]] bool init(struct epoll_event *events, std::size_t capacity) noexcept {
+  [[nodiscard]] bool init() noexcept {
     if (epoll_fd_ >= 0)
       return false;
     epoll_fd_ = ::epoll_create1(EPOLL_CLOEXEC);
-    if (epoll_fd_ < 0)
-      return false;
-    events_ = events;
-    capacity_ = capacity;
-    return true;
+    return epoll_fd_ >= 0;
   }
 
   [[nodiscard]] bool is_ready() const noexcept { return epoll_fd_ >= 0; }
@@ -71,14 +65,12 @@ class epoll_ring_t {
     return ::epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, fd, nullptr) == 0;
   }
 
-  // Espera eventos. `timeout_ms` negativo espera sin limite. Devuelve la
-  // cantidad de eventos, 0 si vencio el timeout, o -1 si fallo.
-  [[nodiscard]] int wait(int timeout_ms) noexcept {
-    return ::epoll_wait(epoll_fd_, events_, static_cast<int>(capacity_), timeout_ms);
-  }
-
-  [[nodiscard]] const struct epoll_event &event_at(std::size_t index) const noexcept {
-    return events_[index];
+  // Espera eventos sobre el buffer del worker. Cada worker tiene el suyo, asi
+  // que varios pueden esperar sin pisarse. `timeout_ms` negativo espera sin
+  // limite. Devuelve la cantidad de eventos, 0 si vencio, o -1 si fallo.
+  [[nodiscard]] int
+  wait(struct epoll_event *events, std::size_t capacity, int timeout_ms) const noexcept {
+    return ::epoll_wait(epoll_fd_, events, static_cast<int>(capacity), timeout_ms);
   }
 }; // class epoll_ring_t
 

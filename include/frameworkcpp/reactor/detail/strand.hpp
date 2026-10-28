@@ -3,9 +3,14 @@
 #pragma once
 
 #include <atomic>
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
+#include <mutex>
+#include <thread>
 
+#include "frameworkcpp/concurrency.hpp"
 #include "frameworkcpp/reactor/detail/op.hpp"
 
 namespace frameworkcpp::reactor::detail {
@@ -20,6 +25,13 @@ class strand_t {
   std::atomic<op_t *> head_{nullptr};
   std::atomic<op_t *> tail_{nullptr};
   std::atomic<bool> busy_{false};
+  concurrency_model_t model_ = concurrency_model_t::single_thread_;
+  mutable std::mutex mutex_;
+  bool shared_ = false;
+#ifndef NDEBUG
+  std::atomic<bool> producer_claimed_{false};
+  std::atomic<std::uint64_t> producer_thread_{0};
+#endif
 
   public:
   strand_t() = default;
@@ -31,6 +43,67 @@ class strand_t {
 
   // Agrega un op al final de la lista del strand.
   void enqueue(op_t *op) noexcept {
+    if (shared_) {
+      const std::lock_guard _lock_k{mutex_};
+      enqueue_locked(op);
+      return;
+    }
+    enqueue_locked(op);
+  }
+
+  // Extrae el op del frente solo si el strand está libre. Devuelve nullptr si
+  // está ocupado o vacío.
+  op_t *try_dispatch() noexcept {
+    if (shared_) {
+      const std::lock_guard _lock_k{mutex_};
+      return try_dispatch_locked();
+    }
+    return try_dispatch_locked();
+  }
+
+  // Libera el strand: la op en vuelo terminó y la siguiente puede arrancar.
+  void release() noexcept {
+    if (shared_) {
+      const std::lock_guard _lock_k{mutex_};
+      busy_.store(false, std::memory_order_release);
+      return;
+    }
+    busy_.store(false, std::memory_order_release);
+  }
+
+  [[nodiscard]] bool empty() const noexcept {
+    if (shared_) {
+      const std::lock_guard _lock_k{mutex_};
+      return head_.load(std::memory_order_acquire) == nullptr;
+    }
+    return head_.load(std::memory_order_acquire) == nullptr;
+  }
+
+  void set_shared(bool shared) noexcept { shared_ = shared; }
+
+  void set_concurrency_model(concurrency_model_t model) noexcept { model_ = model; }
+
+  [[nodiscard]] concurrency_model_t get_concurrency_model() const noexcept { return model_; }
+
+  // El modelo del strand es el contrato de submission: single_thread_ dice
+  // que un solo hilo postea ops para esta clave. En debug se verifica.
+  void assert_submission_thread() noexcept {
+#ifndef NDEBUG
+    if (model_ != concurrency_model_t::single_thread_)
+      return;
+    const auto _token_k =
+        static_cast<std::uint64_t>(std::hash<std::thread::id>{}(std::this_thread::get_id()));
+    if (!producer_claimed_.exchange(true, std::memory_order_acq_rel)) {
+      producer_thread_.store(_token_k, std::memory_order_release);
+      return;
+    }
+    assert(producer_thread_.load(std::memory_order_acquire) == _token_k &&
+           "single_thread_ strand posted from more than one thread");
+#endif
+  }
+
+  private:
+  void enqueue_locked(op_t *op) noexcept {
     op->next_ = nullptr;
     op_t *_prev_k = tail_.exchange(op, std::memory_order_acq_rel);
     if (_prev_k == nullptr)
@@ -39,9 +112,7 @@ class strand_t {
       _prev_k->next_ = op;
   }
 
-  // Extrae el op del frente solo si el strand está libre. Devuelve nullptr si
-  // está ocupado o vacío.
-  op_t *try_dispatch() noexcept {
+  op_t *try_dispatch_locked() noexcept {
     if (busy_.load(std::memory_order_acquire))
       return nullptr;
     op_t *_head_k = head_.load(std::memory_order_acquire);
@@ -56,13 +127,6 @@ class strand_t {
     _head_k->next_ = nullptr;
     busy_.store(true, std::memory_order_release);
     return _head_k;
-  }
-
-  // Libera el strand: la op en vuelo terminó y la siguiente puede arrancar.
-  void release() noexcept { busy_.store(false, std::memory_order_release); }
-
-  [[nodiscard]] bool empty() const noexcept {
-    return head_.load(std::memory_order_acquire) == nullptr;
   }
 }; // class strand_t
 
