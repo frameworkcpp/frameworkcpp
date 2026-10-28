@@ -1083,8 +1083,9 @@ inline void reactor_t::run_queue(std::size_t index, std::size_t worker) const no
       for (int _i = 0; _i < _count_k; ++_i) {
         const auto &_ev = _events_k[static_cast<std::size_t>(_i)];
         detail::socket_slot_t *_slot = nullptr;
-        if (_ev.data.fd >= 0 && static_cast<std::size_t>(_ev.data.fd) <= _qc->num_sockets_)
-          _slot = &_qc->sockets_[static_cast<std::size_t>(_ev.data.fd) - 1];
+        const std::uint64_t _token_k = _ev.data.u64;
+        if (_token_k >= 1 && _token_k <= _qc->num_sockets_)
+          _slot = &_qc->sockets_[static_cast<std::size_t>(_token_k) - 1];
         detail::op_t *_op_ev = nullptr;
         if (_slot != nullptr) {
           if ((_ev.events & (EPOLLIN | EPOLLHUP | EPOLLERR)) != 0)
