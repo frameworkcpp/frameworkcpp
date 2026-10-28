@@ -347,7 +347,7 @@ inline socket_t reactor_t::create_socket(int fd, queue_t *queue) const noexcept 
 
 // Reloj monotónico en nanosegundos. Es la base de todos los deadlines.
 inline std::uint64_t monotonic_now_ns() noexcept {
-  struct timespec _ts{};
+  struct timespec _ts {};
   ::clock_gettime(CLOCK_MONOTONIC, &_ts);
   return (static_cast<std::uint64_t>(_ts.tv_sec) * 1000000000ULL) +
          static_cast<std::uint64_t>(_ts.tv_nsec);
