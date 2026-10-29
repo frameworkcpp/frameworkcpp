@@ -10,7 +10,7 @@ has to implement.
 
 ## The contract
 
-A module that carves its state out of an arena exposes one `constexpr`
+A module that carves its state out of a memory exposes one `constexpr`
 function:
 
 ```cpp
@@ -36,20 +36,20 @@ static_assert(env_bytes_k > 0);
 
 ## Combining modules
 
-The arena is shared, so the budgets have to add up. `make_reservation` and
+The memory is shared, so the budgets have to add up. `make_reservation` and
 `merge_reservations` do that in one expression:
 
 ```cpp
-#include <frameworkcpp/arena/module_memory.hpp>
+#include <frameworkcpp/memory/module_memory.hpp>
 
 constexpr std::size_t total_k =
-    arena::merge_reservations(
-        arena::make_reservation<environment::environment_module_t>("environment", env_k),
-        arena::make_reservation<reactor::reactor_module_t>("reactor", rea_k));
+    memory::merge_reservations(
+        memory::make_reservation<environment::environment_module_t>("environment", env_k),
+        memory::make_reservation<reactor::reactor_module_t>("reactor", rea_k));
 
-arena::arena_config_t arena_config;
-arena_config.size_ = arena::round_to_page(total_k);
-arena::arena_t arena{arena_config};
+memory::memory_config_t memory_config;
+memory_config.size_ = memory::round_to_page(total_k);
+memory::memory_t memory{memory_config};
 ```
 
 Each module ships a small adapter so the call site reads the same for every
@@ -70,7 +70,7 @@ A new module has to do three things.
 **1. Size its state from the configuration.** Every buffer, table and pool is
 derived from the config, so the footprint is a function of it.
 
-**2. Compute the footprint with the arena's own formula.** The arena knows how
+**2. Compute the footprint with the memory's own formula.** The memory knows how
 to size a shard from a table of object descriptors, and that formula is
 `constexpr`:
 
@@ -83,14 +83,14 @@ what makes the number exact:
 
 ```cpp
 constexpr void make_specs(const reactor_config_t &config,
-                          arena::object_spec_t (&specs)[reactor_spec_count_k]) {
+                          memory::object_spec_t (&specs)[reactor_spec_count_k]) {
     // ... fill the descriptors ...
 }
 
 constexpr std::size_t precompute(const reactor_config_t &config) noexcept {
-    arena::object_spec_t specs[reactor_spec_count_k] = {};
+    memory::object_spec_t specs[reactor_spec_count_k] = {};
     make_specs(config, specs);
-    return arena::shard_footprint(specs);
+    return memory::shard_footprint(specs);
 }
 ```
 
@@ -100,7 +100,7 @@ can be named in a `merge_reservations` call.
 ## Why it matters
 
 Without this contract, every module grows its own way: one estimates, another
-over-reserves, a third asks the user for a number. Then the arena is sized by
+over-reserves, a third asks the user for a number. Then the memory is sized by
 guesswork and the first module to grow pushes the others out.
 
 With the contract, the program declares its whole memory budget in one place,

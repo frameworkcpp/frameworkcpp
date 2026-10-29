@@ -16,7 +16,7 @@
 #include <sys/un.h>
 #include <unistd.h>
 
-#include "frameworkcpp/arena/arena.hpp"
+#include "frameworkcpp/memory/memory.hpp"
 #include "frameworkcpp/reactor/reactor.hpp"
 
 namespace frameworkcpp::reactor {
@@ -25,8 +25,8 @@ namespace {
 constexpr std::size_t queue_count_k = 2;
 constexpr std::size_t jobs_per_queue_k = 64;
 
-arena::arena_config_t make_arena_config(std::size_t bytes) {
-  arena::arena_config_t _config;
+memory::memory_config_t make_memory_config(std::size_t bytes) {
+  memory::memory_config_t _config;
   _config.size_ = bytes;
   return _config;
 }
@@ -63,43 +63,45 @@ void on_send(void *ctx, const op_result_t &result) {
   _context->done_.store(true);
 }
 
-// El footprint calculado en compile time debe caber exactamente en el arena.
+// El footprint calculado en compile time debe caber exactamente en el memory.
 TEST(reactor_test_t, FootprintIsExactAndConstexpr) {
   constexpr reactor_config_t _config_k = make_reactor_config();
   constexpr std::size_t _bytes_k = precompute(_config_k);
   static_assert(_bytes_k > 0, "footprint must be known at compile time");
 
-  // El footprint coincide con el shard que la arena calcula a partir de la
+  // El footprint coincide con el shard que la memory calcula a partir de la
   // misma tabla de specs. Esto se comprueba en compile time, así que vale
   // aunque el kernel no exponga io_uring.
   constexpr std::size_t _expected_k = []() {
-    arena::object_spec_t _specs[reactor_spec_count_k] = {};
+    memory::object_spec_t _specs[reactor_spec_count_k] = {};
     make_specs(make_reactor_config(), _specs);
-    return arena::shard_footprint(_specs);
+    return memory::shard_footprint(_specs);
   }();
   static_assert(_bytes_k == _expected_k, "precompute must match the shard footprint");
 
-  auto _arena_config = make_arena_config(arena::round_to_page(_bytes_k));
-  arena::arena_t _arena{_arena_config};
+  auto _memory_config = make_memory_config(memory::round_to_page(_bytes_k));
+  memory::memory_t _memory{_memory_config};
 
   reactor_t _reactor;
-  ASSERT_TRUE(_reactor.bind_arena(_arena, _config_k));
-  EXPECT_EQ(_arena.get_used(), _bytes_k);
+  ASSERT_TRUE(_reactor.bind_memory(_memory, _config_k));
+  EXPECT_EQ(_memory.get_used(), _bytes_k);
 }
 
-TEST(reactor_test_t, BindArenaAllocatesNothingOnTheHeap) {
-  auto _arena_config = make_arena_config(arena::round_to_page(precompute(make_reactor_config())));
-  arena::arena_t _arena{_arena_config};
+TEST(reactor_test_t, BindMemoryAllocatesNothingOnTheHeap) {
+  auto _memory_config =
+      make_memory_config(memory::round_to_page(precompute(make_reactor_config())));
+  memory::memory_t _memory{_memory_config};
   reactor_t _reactor;
-  EXPECT_TRUE(_reactor.bind_arena(_arena, make_reactor_config()));
+  EXPECT_TRUE(_reactor.bind_memory(_memory, make_reactor_config()));
   EXPECT_TRUE(_reactor.initialized());
 }
 
 TEST(reactor_test_t, GetOrCreateIsIdempotentPerName) {
-  auto _arena_config = make_arena_config(arena::round_to_page(precompute(make_reactor_config())));
-  arena::arena_t _arena{_arena_config};
+  auto _memory_config =
+      make_memory_config(memory::round_to_page(precompute(make_reactor_config())));
+  memory::memory_t _memory{_memory_config};
   reactor_t _reactor;
-  ASSERT_TRUE(_reactor.bind_arena(_arena, make_reactor_config()));
+  ASSERT_TRUE(_reactor.bind_memory(_memory, make_reactor_config()));
 
   auto *_queue_a = _reactor.get_or_create("alpha");
   auto *_queue_b = _reactor.get_or_create("alpha");
@@ -114,10 +116,11 @@ TEST(reactor_test_t, ReceivesOverIoUring) {
   int _fds[2] = {-1, -1};
   ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, _fds), 0);
 
-  auto _arena_config = make_arena_config(arena::round_to_page(precompute(make_reactor_config())));
-  arena::arena_t _arena{_arena_config};
+  auto _memory_config =
+      make_memory_config(memory::round_to_page(precompute(make_reactor_config())));
+  memory::memory_t _memory{_memory_config};
   reactor_t _reactor;
-  ASSERT_TRUE(_reactor.bind_arena(_arena, make_reactor_config()));
+  ASSERT_TRUE(_reactor.bind_memory(_memory, make_reactor_config()));
 
   auto *_queue = _reactor.get_or_create("echo");
   ASSERT_NE(_queue, nullptr);
@@ -151,10 +154,11 @@ TEST(reactor_test_t, SendsOverIoUring) {
   int _fds[2] = {-1, -1};
   ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, _fds), 0);
 
-  auto _arena_config = make_arena_config(arena::round_to_page(precompute(make_reactor_config())));
-  arena::arena_t _arena{_arena_config};
+  auto _memory_config =
+      make_memory_config(memory::round_to_page(precompute(make_reactor_config())));
+  memory::memory_t _memory{_memory_config};
   reactor_t _reactor;
-  ASSERT_TRUE(_reactor.bind_arena(_arena, make_reactor_config()));
+  ASSERT_TRUE(_reactor.bind_memory(_memory, make_reactor_config()));
 
   auto *_queue = _reactor.get_or_create("sender");
   auto _socket = _reactor.create_socket(_fds[0], _queue);
@@ -188,10 +192,11 @@ TEST(reactor_test_t, MigratesAnIdleSocketToAnotherQueue) {
   int _fds[2] = {-1, -1};
   ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, _fds), 0);
 
-  auto _arena_config = make_arena_config(arena::round_to_page(precompute(make_reactor_config())));
-  arena::arena_t _arena{_arena_config};
+  auto _memory_config =
+      make_memory_config(memory::round_to_page(precompute(make_reactor_config())));
+  memory::memory_t _memory{_memory_config};
   reactor_t _reactor;
-  ASSERT_TRUE(_reactor.bind_arena(_arena, make_reactor_config()));
+  ASSERT_TRUE(_reactor.bind_memory(_memory, make_reactor_config()));
 
   auto *_queue_a = _reactor.get_or_create("alpha");
   auto *_queue_b = _reactor.get_or_create("beta");
@@ -217,10 +222,11 @@ TEST(reactor_test_t, RefusesToMigrateABusySocket) {
   int _fds[2] = {-1, -1};
   ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, _fds), 0);
 
-  auto _arena_config = make_arena_config(arena::round_to_page(precompute(make_reactor_config())));
-  arena::arena_t _arena{_arena_config};
+  auto _memory_config =
+      make_memory_config(memory::round_to_page(precompute(make_reactor_config())));
+  memory::memory_t _memory{_memory_config};
   reactor_t _reactor;
-  ASSERT_TRUE(_reactor.bind_arena(_arena, make_reactor_config()));
+  ASSERT_TRUE(_reactor.bind_memory(_memory, make_reactor_config()));
 
   auto *_queue_a = _reactor.get_or_create("alpha");
   auto *_queue_b = _reactor.get_or_create("beta");
@@ -244,10 +250,11 @@ TEST(reactor_test_t, RebalancesSocketsAcrossQueues) {
   for (int _index = 0; _index < 4; ++_index)
     ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, &_fds[_index * 2]), 0);
 
-  auto _arena_config = make_arena_config(arena::round_to_page(precompute(make_reactor_config())));
-  arena::arena_t _arena{_arena_config};
+  auto _memory_config =
+      make_memory_config(memory::round_to_page(precompute(make_reactor_config())));
+  memory::memory_t _memory{_memory_config};
   reactor_t _reactor;
-  ASSERT_TRUE(_reactor.bind_arena(_arena, make_reactor_config()));
+  ASSERT_TRUE(_reactor.bind_memory(_memory, make_reactor_config()));
 
   auto *_queue_a = _reactor.get_or_create("alpha");
   auto *_queue_b = _reactor.get_or_create("beta");
@@ -278,10 +285,10 @@ TEST(reactor_test_t, AffinityPinsEachQueueToItsOwnCore) {
   reactor_config_t _config = make_reactor_config();
   _config.affinity_ = true;
 
-  auto _arena_config = make_arena_config(arena::round_to_page(precompute(_config)));
-  arena::arena_t _arena{_arena_config};
+  auto _memory_config = make_memory_config(memory::round_to_page(precompute(_config)));
+  memory::memory_t _memory{_memory_config};
   reactor_t _reactor;
-  ASSERT_TRUE(_reactor.bind_arena(_arena, _config));
+  ASSERT_TRUE(_reactor.bind_memory(_memory, _config));
 
   // Con afinidad activa el reactor arranca igual: el pin es una mejora, no un
   // requisito. Si el sistema no lo permite, el reactor sigue funcionando.
@@ -303,10 +310,11 @@ void on_timer(void *ctx, const op_result_t &result) {
 }
 
 TEST(reactor_test_t, TimerFiresAfterItsDeadline) {
-  auto _arena_config = make_arena_config(arena::round_to_page(precompute(make_reactor_config())));
-  arena::arena_t _arena{_arena_config};
+  auto _memory_config =
+      make_memory_config(memory::round_to_page(precompute(make_reactor_config())));
+  memory::memory_t _memory{_memory_config};
   reactor_t _reactor;
-  ASSERT_TRUE(_reactor.bind_arena(_arena, make_reactor_config()));
+  ASSERT_TRUE(_reactor.bind_memory(_memory, make_reactor_config()));
 
   auto *_queue = _reactor.get_or_create("timers");
   ASSERT_NE(_queue, nullptr);
@@ -331,10 +339,10 @@ TEST(reactor_test_t, TimerFiresAfterItsDeadline) {
 
 TEST(reactor_test_t, CancelsATimerBeforeItFires) {
   const reactor_config_t _config_k = make_reactor_config();
-  auto _arena_config = make_arena_config(arena::round_to_page(precompute(_config_k)));
-  arena::arena_t _arena{_arena_config};
+  auto _memory_config = make_memory_config(memory::round_to_page(precompute(_config_k)));
+  memory::memory_t _memory{_memory_config};
   reactor_t _reactor;
-  ASSERT_TRUE(_reactor.bind_arena(_arena, _config_k));
+  ASSERT_TRUE(_reactor.bind_memory(_memory, _config_k));
 
   auto *_queue = _reactor.get_or_create("timers");
   timer_context_t _context;
@@ -356,10 +364,11 @@ TEST(reactor_test_t, CancelsATimerBeforeItFires) {
 }
 
 TEST(reactor_test_t, FiresTimersInDeadlineOrder) {
-  auto _arena_config = make_arena_config(arena::round_to_page(precompute(make_reactor_config())));
-  arena::arena_t _arena{_arena_config};
+  auto _memory_config =
+      make_memory_config(memory::round_to_page(precompute(make_reactor_config())));
+  memory::memory_t _memory{_memory_config};
   reactor_t _reactor;
-  ASSERT_TRUE(_reactor.bind_arena(_arena, make_reactor_config()));
+  ASSERT_TRUE(_reactor.bind_memory(_memory, make_reactor_config()));
 
   auto *_queue = _reactor.get_or_create("timers");
   timer_context_t _first;
@@ -417,10 +426,11 @@ TEST(reactor_test_t, TimerWithStrandDoesNotOverlapTheStrand) {
   int _fds[2] = {-1, -1};
   ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, _fds), 0);
 
-  auto _arena_config = make_arena_config(arena::round_to_page(precompute(make_reactor_config())));
-  arena::arena_t _arena{_arena_config};
+  auto _memory_config =
+      make_memory_config(memory::round_to_page(precompute(make_reactor_config())));
+  memory::memory_t _memory{_memory_config};
   reactor_t _reactor;
-  ASSERT_TRUE(_reactor.bind_arena(_arena, make_reactor_config()));
+  ASSERT_TRUE(_reactor.bind_memory(_memory, make_reactor_config()));
 
   auto *_queue = _reactor.get_or_create("strands");
   auto _socket = _reactor.create_socket(_fds[0], _queue);
@@ -482,10 +492,11 @@ void on_udp_send(void *ctx, const op_result_t &result) {
 // Un servidor TCP completo: listen, accept y la conexión entrante.
 TEST(reactor_test_t, RunsATcpServerThatAcceptsAConnection) {
 
-  auto _arena_config = make_arena_config(arena::round_to_page(precompute(make_reactor_config())));
-  arena::arena_t _arena{_arena_config};
+  auto _memory_config =
+      make_memory_config(memory::round_to_page(precompute(make_reactor_config())));
+  memory::memory_t _memory{_memory_config};
   reactor_t _reactor;
-  ASSERT_TRUE(_reactor.bind_arena(_arena, make_reactor_config()));
+  ASSERT_TRUE(_reactor.bind_memory(_memory, make_reactor_config()));
 
   auto *_queue = _reactor.get_or_create("server");
   ASSERT_NE(_queue, nullptr);
@@ -537,10 +548,11 @@ TEST(reactor_test_t, RunsATcpServerThatAcceptsAConnection) {
 // UDP: sendto a una dirección y recepción del datagrama.
 TEST(reactor_test_t, SendsAndReceivesAUnixDatagram) {
 
-  auto _arena_config = make_arena_config(arena::round_to_page(precompute(make_reactor_config())));
-  arena::arena_t _arena{_arena_config};
+  auto _memory_config =
+      make_memory_config(memory::round_to_page(precompute(make_reactor_config())));
+  memory::memory_t _memory{_memory_config};
   reactor_t _reactor;
-  ASSERT_TRUE(_reactor.bind_arena(_arena, make_reactor_config()));
+  ASSERT_TRUE(_reactor.bind_memory(_memory, make_reactor_config()));
 
   auto *_queue = _reactor.get_or_create("udp");
   ASSERT_NE(_queue, nullptr);
@@ -600,10 +612,11 @@ TEST(reactor_test_t, SendsAndReceivesAUnixDatagram) {
 
 // ICMP necesita privilegios: si el sistema no los concede, no es un fallo.
 TEST(reactor_test_t, OpensAnIcmpSocketWhenPrivilegesAllow) {
-  auto _arena_config = make_arena_config(arena::round_to_page(precompute(make_reactor_config())));
-  arena::arena_t _arena{_arena_config};
+  auto _memory_config =
+      make_memory_config(memory::round_to_page(precompute(make_reactor_config())));
+  memory::memory_t _memory{_memory_config};
   reactor_t _reactor;
-  ASSERT_TRUE(_reactor.bind_arena(_arena, make_reactor_config()));
+  ASSERT_TRUE(_reactor.bind_memory(_memory, make_reactor_config()));
 
   auto *_queue = _reactor.get_or_create("icmp");
   auto _socket = _reactor.open_icmp(_queue);
@@ -628,10 +641,11 @@ void on_connect(void *ctx, const op_result_t &result) {
 // Un cliente TCP: connect asíncrono y lectura de la respuesta.
 TEST(reactor_test_t, ConnectsToATcpServer) {
 
-  auto _arena_config = make_arena_config(arena::round_to_page(precompute(make_reactor_config())));
-  arena::arena_t _arena{_arena_config};
+  auto _memory_config =
+      make_memory_config(memory::round_to_page(precompute(make_reactor_config())));
+  memory::memory_t _memory{_memory_config};
   reactor_t _reactor;
-  ASSERT_TRUE(_reactor.bind_arena(_arena, make_reactor_config()));
+  ASSERT_TRUE(_reactor.bind_memory(_memory, make_reactor_config()));
 
   auto *_queue = _reactor.get_or_create("client");
   sockaddr_in _addr{};
@@ -670,10 +684,11 @@ TEST(reactor_test_t, RunsAUnixDomainServerThatAcceptsAConnection) {
   const char *_path_k = "/tmp/frameworkcpp_unix_test.sock";
   ::unlink(_path_k);
 
-  auto _arena_config = make_arena_config(arena::round_to_page(precompute(make_reactor_config())));
-  arena::arena_t _arena{_arena_config};
+  auto _memory_config =
+      make_memory_config(memory::round_to_page(precompute(make_reactor_config())));
+  memory::memory_t _memory{_memory_config};
   reactor_t _reactor;
-  ASSERT_TRUE(_reactor.bind_arena(_arena, make_reactor_config()));
+  ASSERT_TRUE(_reactor.bind_memory(_memory, make_reactor_config()));
 
   auto *_queue = _reactor.get_or_create("unix");
   auto _listener = _reactor.listen_unix(_queue, _path_k);
@@ -716,10 +731,10 @@ TEST(reactor_test_t, DegradesWithoutIoUringAndStillRunsTimers) {
   reactor_config_t _config = make_reactor_config();
   _config.backend_ = backend_t::epoll_;
 
-  auto _arena_config = make_arena_config(arena::round_to_page(precompute(_config)));
-  arena::arena_t _arena{_arena_config};
+  auto _memory_config = make_memory_config(memory::round_to_page(precompute(_config)));
+  memory::memory_t _memory{_memory_config};
   reactor_t _reactor;
-  ASSERT_TRUE(_reactor.bind_arena(_arena, _config));
+  ASSERT_TRUE(_reactor.bind_memory(_memory, _config));
   EXPECT_TRUE(_reactor.initialized());
 
   auto *_queue = _reactor.get_or_create("degraded");
@@ -747,10 +762,10 @@ TEST(reactor_test_t, EpollBackendServesIoWithoutIoUring) {
   reactor_config_t _config = make_reactor_config();
   _config.backend_ = backend_t::epoll_;
 
-  auto _arena_config = make_arena_config(arena::round_to_page(precompute(_config)));
-  arena::arena_t _arena{_arena_config};
+  auto _memory_config = make_memory_config(memory::round_to_page(precompute(_config)));
+  memory::memory_t _memory{_memory_config};
   reactor_t _reactor;
-  ASSERT_TRUE(_reactor.bind_arena(_arena, _config));
+  ASSERT_TRUE(_reactor.bind_memory(_memory, _config));
   EXPECT_EQ(_reactor.get_backend(), backend_t::epoll_);
 
   auto *_queue = _reactor.get_or_create("epoll");
@@ -784,14 +799,14 @@ TEST(reactor_test_t, EpollBackendServesIoWithoutIoUring) {
 
 TEST(reactor_test_t, ForcedIoUringBackendFailsWhenTheKernelHasNone) {
   // Pedir io_uring explicitamente es estricto: si el kernel no lo expone,
-  // bind_arena falla en vez de caer a otro backend.
+  // bind_memory falla en vez de caer a otro backend.
   reactor_config_t _config = make_reactor_config();
   _config.backend_ = backend_t::io_uring_;
 
-  auto _arena_config = make_arena_config(arena::round_to_page(precompute(_config)));
-  arena::arena_t _arena{_arena_config};
+  auto _memory_config = make_memory_config(memory::round_to_page(precompute(_config)));
+  memory::memory_t _memory{_memory_config};
   reactor_t _reactor;
-  const bool _bound_k = _reactor.bind_arena(_arena, _config);
+  const bool _bound_k = _reactor.bind_memory(_memory, _config);
 
   if (io_uring_available()) {
     ASSERT_TRUE(_bound_k);
@@ -804,10 +819,10 @@ TEST(reactor_test_t, ForcedIoUringBackendFailsWhenTheKernelHasNone) {
 TEST(reactor_test_t, AutoBackendPicksIoUringWhenAvailable) {
   const reactor_config_t _config_k = make_reactor_config();
 
-  auto _arena_config = make_arena_config(arena::round_to_page(precompute(_config_k)));
-  arena::arena_t _arena{_arena_config};
+  auto _memory_config = make_memory_config(memory::round_to_page(precompute(_config_k)));
+  memory::memory_t _memory{_memory_config};
   reactor_t _reactor;
-  ASSERT_TRUE(_reactor.bind_arena(_arena, _config_k));
+  ASSERT_TRUE(_reactor.bind_memory(_memory, _config_k));
 
   const backend_t _expected_k = io_uring_available() ? backend_t::io_uring_ : backend_t::epoll_;
   EXPECT_EQ(_reactor.get_backend(), _expected_k);
@@ -819,10 +834,10 @@ TEST(reactor_test_t, RejectsASecondOperationOnTheSameDirection) {
   // dos backends.
   const reactor_config_t _config_k = make_reactor_config();
 
-  auto _arena_config = make_arena_config(arena::round_to_page(precompute(_config_k)));
-  arena::arena_t _arena{_arena_config};
+  auto _memory_config = make_memory_config(memory::round_to_page(precompute(_config_k)));
+  memory::memory_t _memory{_memory_config};
   reactor_t _reactor;
-  ASSERT_TRUE(_reactor.bind_arena(_arena, _config_k));
+  ASSERT_TRUE(_reactor.bind_memory(_memory, _config_k));
 
   auto *_queue = _reactor.get_or_create("busy");
   int _fds[2] = {-1, -1};
@@ -860,10 +875,10 @@ TEST(reactor_test_t, ClosingASocketWithAReadPendingReleasesTheSlot) {
   // termina. Y el slot tiene que quedar libre para poder reutilizarlo.
   const reactor_config_t _config_k = make_reactor_config();
 
-  auto _arena_config = make_arena_config(arena::round_to_page(precompute(_config_k)));
-  arena::arena_t _arena{_arena_config};
+  auto _memory_config = make_memory_config(memory::round_to_page(precompute(_config_k)));
+  memory::memory_t _memory{_memory_config};
   reactor_t _reactor;
-  ASSERT_TRUE(_reactor.bind_arena(_arena, _config_k));
+  ASSERT_TRUE(_reactor.bind_memory(_memory, _config_k));
 
   auto *_queue = _reactor.get_or_create("closing");
   int _fds[2] = {-1, -1};
@@ -949,11 +964,11 @@ void run_concurrent_posts(concurrency_model_t model) {
   constexpr std::size_t _posts_per_producer_k = 250;
   constexpr std::size_t _expected_k = _producer_count_k * _posts_per_producer_k;
 
-  auto _arena_config =
-      make_arena_config(arena::round_to_page(precompute(make_concurrency_config(model))));
-  arena::arena_t _arena{_arena_config};
+  auto _memory_config =
+      make_memory_config(memory::round_to_page(precompute(make_concurrency_config(model))));
+  memory::memory_t _memory{_memory_config};
   reactor_t _reactor;
-  ASSERT_TRUE(_reactor.bind_arena(_arena, make_concurrency_config(model)));
+  ASSERT_TRUE(_reactor.bind_memory(_memory, make_concurrency_config(model)));
 
   auto *_queue = _reactor.get_or_create("producers");
   ASSERT_NE(_queue, nullptr);
@@ -996,10 +1011,10 @@ TEST(reactor_test_t, ThreadSafeQueueSurvivesConcurrentProducers) {
 TEST(reactor_test_t, SingleThreadQueueRunsOnTheCallerThread) {
   const reactor_config_t _config_k = make_concurrency_config(concurrency_model_t::single_thread_);
 
-  auto _arena_config = make_arena_config(arena::round_to_page(precompute(_config_k)));
-  arena::arena_t _arena{_arena_config};
+  auto _memory_config = make_memory_config(memory::round_to_page(precompute(_config_k)));
+  memory::memory_t _memory{_memory_config};
   reactor_t _reactor;
-  ASSERT_TRUE(_reactor.bind_arena(_arena, _config_k));
+  ASSERT_TRUE(_reactor.bind_memory(_memory, _config_k));
 
   auto *_queue = _reactor.get_or_create("inline");
   ASSERT_NE(_queue, nullptr);
@@ -1024,10 +1039,10 @@ TEST(reactor_test_t, SingleThreadQueueRunsOnTheCallerThread) {
 TEST(reactor_test_t, StrandsCarryTheirOwnConcurrencyModel) {
   const reactor_config_t _config_k = make_concurrency_config(concurrency_model_t::single_thread_);
 
-  auto _arena_config = make_arena_config(arena::round_to_page(precompute(_config_k)));
-  arena::arena_t _arena{_arena_config};
+  auto _memory_config = make_memory_config(memory::round_to_page(precompute(_config_k)));
+  memory::memory_t _memory{_memory_config};
   reactor_t _reactor;
-  ASSERT_TRUE(_reactor.bind_arena(_arena, _config_k));
+  ASSERT_TRUE(_reactor.bind_memory(_memory, _config_k));
 
   auto *_queue = _reactor.get_or_create("strands");
   ASSERT_NE(_queue, nullptr);
@@ -1047,31 +1062,31 @@ TEST(reactor_test_t, StrandsCarryTheirOwnConcurrencyModel) {
 }
 
 TEST(reactor_test_t, RejectsUnsupportedQueueConfiguration) {
-  auto _arena_config = make_arena_config(64 * 1024);
-  arena::arena_t _arena{_arena_config};
+  auto _memory_config = make_memory_config(64 * 1024);
+  memory::memory_t _memory{_memory_config};
   reactor_t _reactor;
 
   reactor_config_t _workers = make_concurrency_config(concurrency_model_t::lock_free_);
   _workers.workers_per_queue_ = 2;
-  EXPECT_FALSE(_reactor.bind_arena(_arena, _workers));
+  EXPECT_FALSE(_reactor.bind_memory(_memory, _workers));
 
   reactor_config_t _non_pow2 = make_concurrency_config(concurrency_model_t::lock_free_);
   _non_pow2.max_jobs_per_queue_ = 100;
-  EXPECT_FALSE(_reactor.bind_arena(_arena, _non_pow2));
+  EXPECT_FALSE(_reactor.bind_memory(_memory, _non_pow2));
 
   reactor_config_t _multi_consumer = make_concurrency_config(concurrency_model_t::lock_free_);
   _multi_consumer.concurrency_.consumers_ = concurrency_model_t::lock_free_;
-  EXPECT_FALSE(_reactor.bind_arena(_arena, _multi_consumer));
+  EXPECT_FALSE(_reactor.bind_memory(_memory, _multi_consumer));
 }
 
 TEST(reactor_test_t, QueuesCanChooseTheirOwnConcurrencyModel) {
   reactor_config_t _config_k = make_concurrency_config(concurrency_model_t::single_thread_);
   _config_k.queues_ = 2;
 
-  auto _arena_config = make_arena_config(arena::round_to_page(precompute(_config_k)));
-  arena::arena_t _arena{_arena_config};
+  auto _memory_config = make_memory_config(memory::round_to_page(precompute(_config_k)));
+  memory::memory_t _memory{_memory_config};
   reactor_t _reactor;
-  ASSERT_TRUE(_reactor.bind_arena(_arena, _config_k));
+  ASSERT_TRUE(_reactor.bind_memory(_memory, _config_k));
 
   auto *_inherited = _reactor.get_or_create("inherited");
   ASSERT_NE(_inherited, nullptr);

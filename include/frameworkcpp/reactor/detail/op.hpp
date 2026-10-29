@@ -11,7 +11,7 @@
 
 namespace frameworkcpp::reactor::detail {
 
-// Una operación pre-reservada en arena. Se rellena al postear y se consume
+// Una operación pre-reservada en memory. Se rellena al postear y se consume
 // al completarse. No hay heap: todo vive en el slice del reactor.
 //
 // El op lleva su propio almacenamiento de direcciones porque el kernel

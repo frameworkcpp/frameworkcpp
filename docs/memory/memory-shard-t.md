@@ -1,20 +1,20 @@
 # Shards
 
-An arena by itself is just a big reserved block. To actually use it you carve a
+A memory store by itself is just a big reserved block. To actually use it you carve a
 **shard**: a contiguous slice of that memory with its own metadata and its own
-buckets. The shard view (`arena_shard_t`) is what you allocate from.
+buckets. The shard view (`memory_shard_t`) is what you allocate from.
 
 ```cpp
-#include <frameworkcpp/arena/arena.hpp>   // to create the shard (arena_t)
+#include "frameworkcpp/memory/memory.hpp">   // to create the shard (memory_t)
 ```
 
-The examples below build an arena, so they need `arena.hpp`. If you are handed a
-shard without building the arena yourself, `arena_shard_t` is in
-`<frameworkcpp/arena/shard.hpp>` on its own.
+The examples below build a memory store, so they need `memory.hpp`. If you are handed a
+shard without building the memory store yourself, `memory_shard_t` is in
+`<frameworkcpp/memory/shard.hpp>` on its own.
 
 ## What a shard is
 
-When the arena carves a shard, it hands out a contiguous slice and installs the
+When the memory store carves a shard, it hands out a contiguous slice and installs the
 shard's metadata (its buckets and their free-lists) **inside that slice**. The
 shard only ever touches its own slice — that is what makes single-thread
 buckets so cheap.
@@ -26,7 +26,7 @@ numbers:
 enum class shard_tag : std::uint64_t { workers_ = 1, io_ = 2 };
 enum class bucket_tag : std::uint64_t { command_ = 0, payload_ = 1 };
 
-auto workers = arena.create_shard(
+auto workers = memory.create_shard(
     static_cast<std::uint64_t>(shard_tag::workers_),
     {
         // { tag, object_size, align, count }
@@ -100,7 +100,7 @@ workers.deallocate(slot);   // back to its bucket, reusable
 ## Grabbing a bucket directly
 
 ```cpp
-arena_bucket_t get_bucket(std::uint64_t tag, concurrency_model_t model);
+memory_bucket_t get_bucket(std::uint64_t tag, concurrency_model_t model);
 ```
 
 `get_bucket(tag, model)` hands you a handle to one specific bucket and fixes
@@ -120,10 +120,10 @@ explicit operator bool() const noexcept;          // false = the shard does not 
 ## A full example
 
 ```cpp
-using namespace frameworkcpp::arena;
+using namespace frameworkcpp::memory;
 
-arena_t arena;
-auto shard = arena.create_shard(
+memory_t memory;
+auto shard = memory.create_shard(
     1,
     {{0, sizeof(std::uint32_t), alignof(std::uint32_t), 256}}); // bucket "0": 256 slots of uint32
 

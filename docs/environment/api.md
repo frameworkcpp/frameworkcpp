@@ -9,7 +9,7 @@ namespace frameworkcpp::environment {
 
 struct environment_config_t { /* ... */ };
 
-void init(arena::arena_t &arena, const environment_config_t &config = {});
+void init(memory::memory_t &memory, const environment_config_t &config = {});
 void shutdown() noexcept;
 
 [[nodiscard]] std::string_view get_env(std::string_view key,
@@ -34,7 +34,7 @@ std::size_t precompute(const environment_config_t &config) noexcept;
 
 Reads the current value of `key`.
 
-- Returns a `std::string_view` **pointing straight at the arena cell** — no copy
+- Returns a `std::string_view` **pointing straight at the memory cell** — no copy
   and no allocation.
 - The view is valid **until the next `get_env`/`set_env` on the same thread**.
   Values are recycled, so the cell behind a view can be reused once your thread
@@ -87,7 +87,7 @@ fixed pool of cells instead of draining a budget.
 ```
 
 Copies up to `capacity` key/value pairs into `out` and returns how many were
-written. Both `std::string_view`s point straight at immutable arena cells, so
+written. Both `std::string_view`s point straight at immutable memory cells, so
 they stay valid while the module lives and the entry is not overwritten by a
 later `set_env`. Returns `0` when the module is uninitialized or `out` is null.
 
@@ -110,17 +110,17 @@ std::size_t precompute(const environment_config_t &config) noexcept;
 ```
 
 Returns how many bytes the module's shard will occupy for a given
-configuration. Use it to size the arena so the module is guaranteed to fit:
+configuration. Use it to size the memory so the module is guaranteed to fit:
 
 ```cpp
 environment::environment_config_t config;
-arena::arena_config_t arena_config;
-arena_config.size_ = environment::get_environment_footprint(config) + (64 * 1024);
-arena::arena_t arena{arena_config};
-environment::init(arena, config);
+memory::memory_config_t memory_config;
+memory_config.size_ = environment::get_environment_footprint(config) + (64 * 1024);
+memory::memory_t memory{memory_config};
+environment::init(memory, config);
 ```
 
-The `+ 64 KiB` is headroom for anything else you carve into the same arena; the
+The `+ 64 KiB` is headroom for anything else you carve into the same memory; the
 footprint itself is exact.
 
 ## What you do not get (by design)

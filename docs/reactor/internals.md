@@ -30,7 +30,7 @@ hundred.
 
 ## The operation pool
 
-Operations are fixed-size records carved from the arena. Each queue owns a
+Operations are fixed-size records carved from the memory store. Each queue owns a
 contiguous segment of the pool, and the queue's own queue of pending operations
 is a ring of pointers into that segment.
 
@@ -145,7 +145,7 @@ flowchart TD
 
 ## The memory layout
 
-`bind_arena` carves one shard with six blocks:
+`bind_memory` carves one shard with six blocks:
 
 | Block | Holds |
 | --- | --- |
@@ -156,7 +156,7 @@ flowchart TD
 | Sockets | The socket table. |
 | Strands | The strand table, shared by every queue. |
 
-`precompute(config)` builds the same table of descriptors and asks the arena
+`precompute(config)` builds the same table of descriptors and asks the memory store
 how many bytes it would take, so the number you budget at compile time is the
 number the reactor carves at runtime. The reactor test asserts exactly that.
 
@@ -204,7 +204,7 @@ Each queue owns a segment of the timer pool and a binary heap over it. A
 timer is an `op_t` with a deadline instead of a descriptor, so firing it is
 the same code path as completing any other operation.
 
-The heap is over pointers to ops that live in the arena, so inserting a timer
+The heap is over pointers to ops that live in the memory store, so inserting a timer
 costs no allocation. Each op remembers its position in the heap, which makes
 cancelling a timer by id a removal rather than a scan.
 
@@ -222,7 +222,7 @@ address has to survive until the completion arrives, so each operation carries
 its own `sockaddr_storage` and `msghdr`.
 
 The cost is size: an operation is a few hundred bytes, not a few dozen. It is
-memory you pay for once, at compile time, out of the arena — and a queue's
+memory you pay for once, at compile time, out of the memory store — and a queue's
 operation pool is sized by `max_jobs_per_queue_`, so a system that does not
 need datagrams can keep that number small.
 

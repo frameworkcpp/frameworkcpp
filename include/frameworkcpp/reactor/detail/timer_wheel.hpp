@@ -14,7 +14,7 @@ namespace frameworkcpp::reactor::detail {
 //
 // Los timers se ordenan por deadline en un heap sobre punteros a op_t. Insertar
 // y expirar son O(log n), sin asignar nada: el array del heap y los ops se
-// reservan en el arena.
+// reservan en el memory.
 //
 // El op guarda su posición en el heap, así que cancelar un timer por id es
 // también O(log n) en vez de un barrido.
@@ -26,7 +26,7 @@ class timer_wheel_t {
   public:
   timer_wheel_t() = default;
 
-  // Pre-reserva el array del heap en arena. `capacity` debe ser potencia de dos.
+  // Pre-reserva el array del heap en memory. `capacity` debe ser potencia de dos.
   bool init(op_t **heap, std::size_t capacity) noexcept;
 
   // Inserta un timer con deadline absoluto (nanosegundos monotónicos).

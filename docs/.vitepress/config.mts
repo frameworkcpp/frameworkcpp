@@ -25,9 +25,9 @@ export default defineConfig({
         text: 'Memory',
         items: [
           { text: 'Overview', link: '/memory/' },
-          { text: 'The Arena', link: '/memory/arena-t' },
-          { text: 'Shards', link: '/memory/arena-shard-t' },
-          { text: 'Buckets', link: '/memory/arena-bucket' },
+          { text: 'The Memory Store', link: '/memory/memory-t' },
+          { text: 'Shards', link: '/memory/memory-shard-t' },
+          { text: 'Buckets', link: '/memory/memory-bucket' },
           { text: 'Smart Pointers', link: '/memory/smart-pointers' },
           { text: 'Allocators & std::pmr', link: '/memory/allocator' },
           { text: 'Memory Reservation', link: '/memory/reservation' },

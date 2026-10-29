@@ -9,10 +9,10 @@
 
 #include "frameworkcpp/concurrency.hpp"
 
-namespace frameworkcpp::arena {
+namespace frameworkcpp::memory {
 
-// The arena and the reactor share one concurrency vocabulary. Keeping the
-// alias here preserves the public `arena::concurrency_model_t` spelling.
+// The memory and the reactor share one concurrency vocabulary. Keeping the
+// alias here preserves the public `memory::concurrency_model_t` spelling.
 using concurrency_model_t = frameworkcpp::concurrency_model_t;
 
 enum class overflow_mode_t : std::uint8_t {
@@ -20,22 +20,22 @@ enum class overflow_mode_t : std::uint8_t {
   abort_ = 1,
 };
 
-using arena_warning_fn = void (*)(const char *message);
+using memory_warning_fn = void (*)(const char *message);
 
-class arena_overflow_exception : public std::bad_alloc {
+class memory_overflow_exception : public std::bad_alloc {
   char message_[160]{};
 
   public:
-  arena_overflow_exception(std::size_t requested, std::size_t hard_limit) {
+  memory_overflow_exception(std::size_t requested, std::size_t hard_limit) {
     std::snprintf(message_,
                   sizeof(message_),
-                  "arena overflow: %zu requested, hard_limit=%zu",
+                  "memory overflow: %zu requested, hard_limit=%zu",
                   requested,
                   hard_limit);
   }
 
   [[nodiscard]] const char *what() const noexcept override { return message_; }
-}; // class arena_overflow_exception
+}; // class memory_overflow_exception
 
 struct object_spec_t {
   std::uint64_t tag_ = 0;
@@ -44,21 +44,21 @@ struct object_spec_t {
   std::size_t count_ = 0;
 }; // struct object_spec_t
 
-// Bounded registries keep arena_t heap-free: shards and regions live in fixed
+// Bounded registries keep memory_t heap-free: shards and regions live in fixed
 // arrays sized at compile time. These constants are the hard caps.
-inline constexpr std::size_t max_arena_shards_k = 256;
-inline constexpr std::size_t max_arena_regions_k = 16;
+inline constexpr std::size_t max_memory_shards_k = 256;
+inline constexpr std::size_t max_memory_regions_k = 16;
 
-struct arena_config_t {
+struct memory_config_t {
   std::size_t size_ = 1024 * 1024;
   std::size_t soft_limit_ = 0; // warning watermark; 0 disables it
   std::size_t hard_limit_ = 0; // total reserved budget; 0 = unbounded
   overflow_mode_t overflow_ = overflow_mode_t::throw_error_;
-  arena_warning_fn on_warning_ = nullptr;
+  memory_warning_fn on_warning_ = nullptr;
   bool touch_pages_ = false;
-  std::size_t max_shards_ = max_arena_shards_k;   // shard/tag registry capacity
-  std::size_t max_regions_ = max_arena_regions_k; // mmap region capacity
-}; // struct arena_config_t
+  std::size_t max_shards_ = max_memory_shards_k;   // shard/tag registry capacity
+  std::size_t max_regions_ = max_memory_regions_k; // mmap region capacity
+}; // struct memory_config_t
 
 struct bucket_stats_t {
   std::uint64_t tag_;
@@ -68,4 +68,4 @@ struct bucket_stats_t {
   std::int64_t in_use_;
   std::int64_t freed_;
 }; // struct bucket_stats_t
-} // namespace frameworkcpp::arena
+} // namespace frameworkcpp::memory

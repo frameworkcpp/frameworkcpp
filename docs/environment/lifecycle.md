@@ -7,7 +7,7 @@ decided at `init` — nothing grows later.
 ```cpp
 #include <frameworkcpp/environment/environment.hpp>
 
-void init(arena::arena_t &arena, const environment_config_t &config = {});
+void init(memory::memory_t &memory, const environment_config_t &config = {});
 void shutdown() noexcept;
 ```
 
@@ -16,8 +16,8 @@ void shutdown() noexcept;
 `init` does four things, in order:
 
 1. Validates the configuration and computes the module's footprint.
-2. Carves a shard out of the arena and lays out the key table, value pool,
-   journal and the view storage. If the arena has no room, it throws
+2. Carves a shard out of the memory and lays out the key table, value pool,
+   journal and the view storage. If the memory has no room, it throws
    `std::runtime_error` (and `std::invalid_argument` if a capacity is zero).
 3. Loads the **process environment** first (unless `read_process_env_` is off).
 4. Loads the **dotenv file** after (if `dotenv_path_` is set), filling only
@@ -48,7 +48,7 @@ To add specific defaults without inheriting everything:
 environment_config_t config;
 config.read_process_env_ = false;        // start from an empty store
 config.dotenv_path_ = "app.env";         // defaults live in the file
-environment::init(arena, config);
+environment::init(memory, config);
 environment::set_env("LOG_LEVEL", "info"); // explicit defaults
 ```
 
@@ -68,15 +68,15 @@ touches the heap. A missing file is not an error — `init` simply skips it.
 ## shutdown
 
 `shutdown` releases the module's handle: subsequent `get_env` calls fall back and
-`set_env` returns `false`. It does **not** free the arena — the arena owns the
-memory, and unmapping it is the arena's job. Call `shutdown` after every thread
-has stopped using the module and before the arena goes away.
+`set_env` returns `false`. It does **not** free the memory — the memory owns the
+memory, and unmapping it is the memory's job. Call `shutdown` after every thread
+has stopped using the module and before the memory goes away.
 
 ```cpp
-environment::init(arena);
+environment::init(memory);
 // ... run your system ...
 environment::shutdown();
-// arena is destroyed later, reclaiming all module memory at once
+// memory is destroyed later, reclaiming all module memory at once
 ```
 
 ## Threading rules
@@ -91,4 +91,4 @@ Views are per-thread and are drawn from a fixed pool (`max_threads_`). A thread
 claims a free slot the first time it touches the store and hands it back when the
 thread exits, so slots are recycled rather than consumed; if every slot is in use
 at once, `get_env` still works by reading the global slot directly (just
-slower). The arena must outlive every reader and writer.
+slower). The memory must outlive every reader and writer.

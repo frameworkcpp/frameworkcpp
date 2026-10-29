@@ -10,34 +10,34 @@
 #include <type_traits>
 #include <utility>
 
-#include "frameworkcpp/arena/shard.hpp"
+#include "frameworkcpp/memory/shard.hpp"
 
-namespace frameworkcpp::arena::detail {
-struct arena_control_base_t {
+namespace frameworkcpp::memory::detail {
+struct memory_control_base_t {
   std::atomic<std::int32_t> strong_{1};
   void *object_ = nullptr;
-  arena_shard_t shard_;
-  void (*destroy_)(arena_shard_t &, void *) = nullptr;
-}; // struct arena_control_base_t
-} // namespace frameworkcpp::arena::detail
+  memory_shard_t shard_;
+  void (*destroy_)(memory_shard_t &, void *) = nullptr;
+}; // struct memory_control_base_t
+} // namespace frameworkcpp::memory::detail
 
-namespace frameworkcpp::arena {
-template <typename T> class arena_enable_shared_from_this_t;
+namespace frameworkcpp::memory {
+template <typename T> class memory_enable_shared_from_this_t;
 
-template <typename T> class arena_shared_ptr_t {
-  detail::arena_control_base_t *ctl_ = nullptr;
+template <typename T> class memory_shared_ptr_t {
+  detail::memory_control_base_t *ctl_ = nullptr;
   T *obj_ = nullptr;
 
   public:
-  arena_shared_ptr_t() noexcept = default;
+  memory_shared_ptr_t() noexcept = default;
 
-  arena_shared_ptr_t(const arena_shared_ptr_t &other) noexcept
+  memory_shared_ptr_t(const memory_shared_ptr_t &other) noexcept
       : ctl_(other.ctl_), obj_(other.obj_) {
     if (ctl_ != nullptr)
       ctl_->strong_.fetch_add(1, std::memory_order_relaxed);
   }
 
-  arena_shared_ptr_t &operator=(const arena_shared_ptr_t &other) noexcept {
+  memory_shared_ptr_t &operator=(const memory_shared_ptr_t &other) noexcept {
     if (this != &other) {
       reset();
       ctl_ = other.ctl_;
@@ -48,12 +48,12 @@ template <typename T> class arena_shared_ptr_t {
     return *this;
   }
 
-  arena_shared_ptr_t(arena_shared_ptr_t &&other) noexcept : ctl_(other.ctl_), obj_(other.obj_) {
+  memory_shared_ptr_t(memory_shared_ptr_t &&other) noexcept : ctl_(other.ctl_), obj_(other.obj_) {
     other.ctl_ = nullptr;
     other.obj_ = nullptr;
   }
 
-  arena_shared_ptr_t &operator=(arena_shared_ptr_t &&other) noexcept {
+  memory_shared_ptr_t &operator=(memory_shared_ptr_t &&other) noexcept {
     if (this != &other) {
       reset();
       ctl_ = other.ctl_;
@@ -65,19 +65,20 @@ template <typename T> class arena_shared_ptr_t {
   }
 
   template <typename U>
-  arena_shared_ptr_t(const arena_shared_ptr_t<U> &other) noexcept
+  memory_shared_ptr_t(const memory_shared_ptr_t<U> &other) noexcept
       : ctl_(other.ctl_), obj_(other.obj_) {
     if (ctl_ != nullptr)
       ctl_->strong_.fetch_add(1, std::memory_order_relaxed);
   }
 
   template <typename U>
-  arena_shared_ptr_t(arena_shared_ptr_t<U> &&other) noexcept : ctl_(other.ctl_), obj_(other.obj_) {
+  memory_shared_ptr_t(memory_shared_ptr_t<U> &&other) noexcept
+      : ctl_(other.ctl_), obj_(other.obj_) {
     other.ctl_ = nullptr;
     other.obj_ = nullptr;
   }
 
-  ~arena_shared_ptr_t() { reset(); }
+  ~memory_shared_ptr_t() { reset(); }
 
   [[nodiscard]] T *get() const noexcept { return obj_; }
   T *operator->() const noexcept { return obj_; }
@@ -94,23 +95,23 @@ template <typename T> class arena_shared_ptr_t {
   }
 
   private:
-  template <typename U> friend class arena_shared_ptr_t;
+  template <typename U> friend class memory_shared_ptr_t;
   template <typename U, typename... Args>
-  friend arena_shared_ptr_t<U> make_arena_shared_ptr(arena_shard_t &, Args &&...);
-  friend class arena_enable_shared_from_this_t<T>;
-}; // class arena_shared_ptr_t
+  friend memory_shared_ptr_t<U> make_memory_shared_ptr(memory_shard_t &, Args &&...);
+  friend class memory_enable_shared_from_this_t<T>;
+}; // class memory_shared_ptr_t
 
-template <typename T> class arena_enable_shared_from_this_t {
-  detail::arena_control_base_t *owner_ = nullptr;
+template <typename T> class memory_enable_shared_from_this_t {
+  detail::memory_control_base_t *owner_ = nullptr;
 
   protected:
-  arena_enable_shared_from_this_t() = default;
+  memory_enable_shared_from_this_t() = default;
 
   public:
-  arena_shared_ptr_t<T> shared_from_this() {
+  memory_shared_ptr_t<T> shared_from_this() {
     if (owner_ == nullptr)
       throw std::bad_weak_ptr();
-    arena_shared_ptr_t<T> _result;
+    memory_shared_ptr_t<T> _result;
     _result.ctl_ = owner_;
     _result.obj_ = static_cast<T *>(owner_->object_);
     owner_->strong_.fetch_add(1, std::memory_order_relaxed);
@@ -119,32 +120,32 @@ template <typename T> class arena_enable_shared_from_this_t {
 
   private:
   template <typename U, typename... Args>
-  friend arena_shared_ptr_t<U> make_arena_shared_ptr(arena_shard_t &, Args &&...);
-}; // class arena_enable_shared_from_this_t
+  friend memory_shared_ptr_t<U> make_memory_shared_ptr(memory_shard_t &, Args &&...);
+}; // class memory_enable_shared_from_this_t
 
 template <typename T, typename... Args>
-arena_shared_ptr_t<T> make_arena_shared_ptr(arena_shard_t &shard, Args &&...args) {
-  constexpr std::size_t _control_size_k = sizeof(detail::arena_control_base_t);
-  constexpr std::size_t _control_align_k = alignof(detail::arena_control_base_t);
+memory_shared_ptr_t<T> make_memory_shared_ptr(memory_shard_t &shard, Args &&...args) {
+  constexpr std::size_t _control_size_k = sizeof(detail::memory_control_base_t);
+  constexpr std::size_t _control_align_k = alignof(detail::memory_control_base_t);
   constexpr std::size_t _align_k = alignof(T) > _control_align_k ? alignof(T) : _control_align_k;
   constexpr std::size_t _object_offset_k = (_control_size_k + alignof(T) - 1) & ~(alignof(T) - 1);
   auto *_raw = shard.allocate_bytes(_object_offset_k + sizeof(T), _align_k);
   if (_raw == nullptr)
-    return arena_shared_ptr_t<T>{};
-  auto *_control = ::new (static_cast<void *>(_raw)) detail::arena_control_base_t{};
+    return memory_shared_ptr_t<T>{};
+  auto *_control = ::new (static_cast<void *>(_raw)) detail::memory_control_base_t{};
   T *_object = ::new (static_cast<void *>(_raw + _object_offset_k)) T(std::forward<Args>(args)...);
   _control->object_ = _object;
   _control->shard_ = shard;
-  _control->destroy_ = +[](arena_shard_t &owning_shard, void *pointer) {
-    auto *_control = static_cast<detail::arena_control_base_t *>(pointer);
+  _control->destroy_ = +[](memory_shard_t &owning_shard, void *pointer) {
+    auto *_control = static_cast<detail::memory_control_base_t *>(pointer);
     static_cast<T *>(_control->object_)->~T();
     owning_shard.deallocate_bytes(pointer);
   };
-  if constexpr (std::derived_from<T, arena_enable_shared_from_this_t<T>>)
+  if constexpr (std::derived_from<T, memory_enable_shared_from_this_t<T>>)
     _object->owner_ = _control;
-  arena_shared_ptr_t<T> _result;
+  memory_shared_ptr_t<T> _result;
   _result.ctl_ = _control;
   _result.obj_ = _object;
   return _result;
 }
-} // namespace frameworkcpp::arena
+} // namespace frameworkcpp::memory

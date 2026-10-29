@@ -10,9 +10,9 @@
 #include <span>
 #include <thread>
 
-#include "frameworkcpp/arena/config.hpp"
+#include "frameworkcpp/memory/config.hpp"
 
-namespace frameworkcpp::arena::detail {
+namespace frameworkcpp::memory::detail {
 inline constexpr std::size_t block_header_size_k = 8;
 inline constexpr std::size_t next_slot_offset_k = 8;
 inline constexpr std::size_t layout_bytes_k = 24;
@@ -332,4 +332,4 @@ inline void adopt_bucket(bucket_descriptor_t &descriptor, concurrency_model_t mo
     std::abort();
   descriptor.model_ = static_cast<std::uint32_t>(model);
 }
-} // namespace frameworkcpp::arena::detail
+} // namespace frameworkcpp::memory::detail

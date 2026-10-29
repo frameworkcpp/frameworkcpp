@@ -5,18 +5,18 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace frameworkcpp::arena {
+namespace frameworkcpp::memory {
 
 // Contrato estándar de reserva de memoria en tiempo de compilación.
 //
-// Todo módulo que necesite carvear memoria de un arena_t debe exponer una
+// Todo módulo que necesite carvear memoria de un memory_t debe exponer una
 // función estática constexpr:
 //
 //     static constexpr std::size_t precompute(const Config &config) noexcept;
 //
 // que devuelva los bytes exactos que requerirá para el dado config. Así el
 // usuario puede sumar los footprints de todos los módulos antes de construir
-// el arena_t y saber, en compile time, cuánta memoria reservar.
+// el memory_t y saber, en compile time, cuánta memoria reservar.
 //
 // Un módulo que cumple el contrato expone además este adaptador:
 //
@@ -28,9 +28,9 @@ namespace frameworkcpp::arena {
 //     constexpr std::size_t env_k = environment::precompute(env_cfg);
 //     constexpr std::size_t rea_k = reactor::precompute(rea_cfg);
 //     constexpr std::size_t total_k = env_k + rea_k;
-//     arena_t arena{arena_config_t{.size_ = total_k}};
-//     environment::init(arena, env_cfg);
-//     reactor.bind_arena(arena, rea_cfg);
+//     memory_t memory{memory_config_t{.size_ = total_k}};
+//     environment::init(memory, env_cfg);
+//     reactor.bind_memory(memory, rea_cfg);
 struct module_memory_t {}; // struct module_memory_t
 
 // Descripción de una reserva individual de módulo. Solo para diagnóstico,
@@ -54,4 +54,4 @@ template <typename... Reservations>
   return (std::size_t{0} + ... + reservations.bytes_);
 }
 
-} // namespace frameworkcpp::arena
+} // namespace frameworkcpp::memory

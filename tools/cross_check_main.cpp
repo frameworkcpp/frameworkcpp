@@ -3,7 +3,7 @@
 // Translation unit used by tools/cross-check.sh.
 //
 // It exercises the public API of every module so the compiler has to
-// instantiate the real code, not just parse the headers: the arenas, the
+// instantiate the real code, not just parse the headers: the memory stores, the
 // views, the queues, the sockets, the timers and the strands. Its real job is
 // to make the compiler evaluate the static_asserts that state the
 // real-time guarantees of the framework, on the architecture being checked.
@@ -15,7 +15,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-#include "frameworkcpp/arena/arena.hpp"
+#include "frameworkcpp/memory/memory.hpp"
 #include "frameworkcpp/environment/environment.hpp"
 #include "frameworkcpp/reactor/reactor.hpp"
 
@@ -52,14 +52,14 @@ int main() {
   constexpr std::size_t total_k = env_bytes_k + reactor_bytes_k;
   static_assert(total_k > 0, "the modules must declare a footprint");
 
-  arena::arena_config_t arena_config{};
-  arena_config.size_ = arena::round_to_page(total_k);
-  arena::arena_t arena{arena_config};
+  memory::memory_config_t memory_config{};
+  memory_config.size_ = memory::round_to_page(total_k);
+  memory::memory_t memory{memory_config};
 
-  environment::init(arena, env_config);
+  environment::init(memory, env_config);
 
   reactor::reactor_t reactor;
-  if (!reactor.bind_arena(arena, reactor_config))
+  if (!reactor.bind_memory(memory, reactor_config))
     return 1;
 
   auto *_queue = reactor.get_or_create("cross");

@@ -4,12 +4,12 @@
 
 #include <cstddef>
 
-#include "frameworkcpp/arena/shard.hpp"
+#include "frameworkcpp/memory/shard.hpp"
 
 namespace frameworkcpp::environment {
 // Tuning knobs for the module. Everything the module owns — key table, value
 // pool, journal ring, retirement queue, per-thread views — is carved from a
-// single arena shard at init, so all of these are hard, fixed capacities:
+// single memory shard at init, so all of these are hard, fixed capacities:
 // nothing grows after init and nothing touches the heap.
 //
 // Values are immutable and recycled: a cell is reused once every live view has
@@ -27,7 +27,7 @@ struct environment_config_t {
   const char *dotenv_path_ = nullptr; // opcional: ruta del archivo .env a cargar
 }; // struct environment_config_t
 
-// How many bytes the module's own shard will occupy in the arena. Usable in a
+// How many bytes the module's own shard will occupy in the memory. Usable in a
 // constant expression (defined in <frameworkcpp/environment/environment.hpp>).
 constexpr std::size_t get_environment_footprint(const environment_config_t &config);
 } // namespace frameworkcpp::environment

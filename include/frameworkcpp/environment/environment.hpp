@@ -2,15 +2,15 @@
 
 #pragma once
 
-// A dotenv-style environment store backed entirely by an arena shard. Values
-// live in immutable arena cells; readers keep a per-thread view and catch up
+// A dotenv-style environment store backed entirely by a memory shard. Values
+// live in immutable memory cells; readers keep a per-thread view and catch up
 // through a bounded delta ring, so a warmed-up get_env never touches a shared
 // atomic beyond the single global version counter.
 //
 // Updates are unbounded while memory stays fixed: a superseded cell is retired
 // and later recycled once every live view has moved past the update that
 // retired it (epoch-based reclamation). A get_env result is valid until the
-// next get_env/set_env on the same thread, and the arena must outlive the
+// next get_env/set_env on the same thread, and the memory must outlive the
 // module.
 //
 // include: #include <frameworkcpp/environment/environment.hpp>
@@ -31,9 +31,9 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#include "frameworkcpp/arena/arena.hpp"
 #include "frameworkcpp/environment/config.hpp"
 #include "frameworkcpp/environment/detail/digest.hpp"
+#include "frameworkcpp/memory/memory.hpp"
 
 namespace frameworkcpp::environment {
 
@@ -46,7 +46,7 @@ static_assert(std::atomic<std::uint64_t>::is_always_lock_free,
 namespace detail {
 
 struct control_t {
-  arena::arena_shard_t shard_;
+  memory::memory_shard_t shard_;
   std::atomic<key_cell_t *> *key_table_; // [slots]
   std::atomic<value_cell_t *> *global_;  // [slots]
   patch_t *journal_;                     // [journal_size]
@@ -74,14 +74,14 @@ inline control_t *&control_ref() noexcept {
 }
 
 // Bumped on every init/shutdown so stale per-thread views never touch a dead
-// arena when their thread exits.
+// memory when their thread exits.
 inline std::atomic<std::uint64_t> &epoch_ref() noexcept {
   static std::atomic<std::uint64_t> _epoch{0};
   return _epoch;
 }
 
 constexpr void make_specs(const environment_config_t &config,
-                          arena::object_spec_t (&specs)[spec_count_k],
+                          memory::object_spec_t (&specs)[spec_count_k],
                           std::size_t &slots,
                           std::size_t &retire_capacity) {
   slots = next_pow2(config.max_keys_ * 2);
@@ -386,13 +386,13 @@ inline void reclaim(control_t *control) {
 
 } // namespace detail
 
-// Carve the module's tables into `arena` and load the process environment
+// Carve the module's tables into `memory` and load the process environment
 // first (it wins), then the dotenv file for any key still unset. Call once,
 // from a single thread, before spawning readers or writers.
 //
 // `dotenv_path` via al config; casi siempre es nullptr, así que se cargan solo
 // las variables de entorno del proceso.
-inline void init(arena::arena_t &arena, const environment_config_t &config = {}) {
+inline void init(memory::memory_t &memory_owner, const environment_config_t &config = {}) {
   if (detail::control_ref() != nullptr)
     throw std::logic_error("environment already initialized");
   if (config.max_keys_ == 0 || config.max_key_len_ == 0 || config.max_value_len_ == 0 ||
@@ -401,18 +401,18 @@ inline void init(arena::arena_t &arena, const environment_config_t &config = {})
   if ((config.journal_size_ & (config.journal_size_ - 1)) != 0)
     throw std::invalid_argument("environment journal_size must be a power of two");
 
-  arena::object_spec_t _specs[detail::spec_count_k] = {};
+  memory::object_spec_t _specs[detail::spec_count_k] = {};
   std::size_t _slots = 0;
   std::size_t _retire_capacity = 0;
   detail::make_specs(config, _specs, _slots, _retire_capacity);
 
-  auto _shard = arena.create_shard(
-      detail::shard_tag_k, std::span<const arena::object_spec_t>(_specs, detail::spec_count_k));
+  auto _shard = memory_owner.create_shard(
+      detail::shard_tag_k, std::span<const memory::object_spec_t>(_specs, detail::spec_count_k));
   if (!_shard)
-    throw std::runtime_error("environment: arena has no room for the module");
+    throw std::runtime_error("environment: memory has no room for the module");
 
-  _shard.get_bucket(detail::key_tag_k, arena::concurrency_model_t::lock_free_);
-  _shard.get_bucket(detail::value_tag_k, arena::concurrency_model_t::lock_free_);
+  _shard.get_bucket(detail::key_tag_k, memory::concurrency_model_t::lock_free_);
+  _shard.get_bucket(detail::value_tag_k, memory::concurrency_model_t::lock_free_);
 
   auto *_control_raw = _shard.allocate_tagged(
       detail::control_tag_k, sizeof(detail::control_t), alignof(detail::control_t));
@@ -481,52 +481,52 @@ inline void init(arena::arena_t &arena, const environment_config_t &config = {})
 }
 
 // Release the module's handle. Joined threads must already have retired their
-// views (which they do on thread exit), and the arena must outlive the call.
+// views (which they do on thread exit), and the memory must outlive the call.
 inline void shutdown() noexcept {
   detail::control_ref() = nullptr;
   detail::epoch_ref().fetch_add(1, std::memory_order_relaxed);
 }
 
 // Bytes the module's shard will occupy for a given configuration. Usable in a
-// constant expression, so you can derive a compile-time arena budget:
+// constant expression, so you can derive a compile-time memory budget:
 //
 //     constexpr environment_config_t env_k{};
 //     constexpr std::size_t env_bytes_k = get_environment_footprint(env_k);
 constexpr std::size_t get_environment_footprint(const environment_config_t &config) {
-  arena::object_spec_t _specs[detail::spec_count_k] = {};
+  memory::object_spec_t _specs[detail::spec_count_k] = {};
   std::size_t _slots = 0;
   std::size_t _retire_capacity = 0;
   detail::make_specs(config, _specs, _slots, _retire_capacity);
-  return arena::shard_footprint(_specs);
+  return memory::shard_footprint(_specs);
 }
 
 // Contrato estándar de reserva de memoria en tiempo de compilación
-// (véase frameworkcpp/arena/module_memory.hpp).
+// (véase frameworkcpp/memory/module_memory.hpp).
 constexpr std::size_t precompute(const environment_config_t &config) noexcept {
   return get_environment_footprint(config);
 }
 
 // Adaptador del módulo al contrato estándar: permite usar
-// arena::make_reservation<environment_module_t>(...) y arena::merge_reservations.
+// memory::make_reservation<environment_module_t>(...) y memory::merge_reservations.
 struct environment_module_t {
   static constexpr std::size_t precompute(const environment_config_t &config) noexcept {
     return environment::precompute(config);
   }
 }; // struct environment_module_t
 
-// The whole arena budget the module needs: its footprint rounded up to a page,
-// plus `extra_bytes` for anything else you carve into the same arena. Feed the
-// result straight into an arena_config_t.
-constexpr std::size_t get_environment_arena_bytes(const environment_config_t &config,
-                                                  std::size_t extra_bytes = 0) {
-  return arena::round_to_page(get_environment_footprint(config) + extra_bytes);
+// The whole memory budget the module needs: its footprint rounded up to a page,
+// plus `extra_bytes` for anything else you carve into the same memory. Feed the
+// result straight into an memory_config_t.
+constexpr std::size_t get_environment_memory_bytes(const environment_config_t &config,
+                                                   std::size_t extra_bytes = 0) {
+  return memory::round_to_page(get_environment_footprint(config) + extra_bytes);
 }
 
-constexpr arena::arena_config_t get_environment_arena_config(const environment_config_t &config,
-                                                             std::size_t extra_bytes = 0) {
-  arena::arena_config_t _arena_config{};
-  _arena_config.size_ = get_environment_arena_bytes(config, extra_bytes);
-  return _arena_config;
+constexpr memory::memory_config_t get_environment_memory_config(const environment_config_t &config,
+                                                                std::size_t extra_bytes = 0) {
+  memory::memory_config_t _memory_config{};
+  _memory_config.size_ = get_environment_memory_bytes(config, extra_bytes);
+  return _memory_config;
 }
 
 // A snapshot of the store's activity. Updates are unbounded; this reports how
@@ -569,7 +569,7 @@ struct environment_stats_t {
 }
 
 // One key/value pair as seen through the store's key table. Both views point
-// straight at immutable arena cells and stay valid while the module lives and
+// straight at immutable memory cells and stay valid while the module lives and
 // the entry is not overwritten by a later set_env (which republishes the value
 // view, never the key view).
 struct environment_entry_t {

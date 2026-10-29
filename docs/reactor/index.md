@@ -29,16 +29,16 @@ request arrives.
 
 | Concept | What it is |
 | --- | --- |
-| **Reactor** | The owner of the queues. It carves its state out of an arena and hands out queues by name. |
+| **Reactor** | The owner of the queues. It carves its state out of a memory and hands out queues by name. |
 | **Queue** | A named event loop with its own `io_uring` ring and its own thread. Two calls with the same name give you the same queue. |
 | **Socket** | A file descriptor registered in a queue. It knows which queue will complete its operations. |
-| **Operation** | A unit of work: read, write, accept, connect. It is a fixed-size record carved from the arena. |
+| **Operation** | A unit of work: read, write, accept, connect. It is a fixed-size record carved from the memory. |
 | **Strand** | A serialisation key. Operations that share a strand never run at the same time. |
 | **Handler** | A plain function pointer plus a context pointer. No closures, no captured state, no heap. |
 
 ## The mental model
 
-1. You size the reactor at compile time and carve it out of an arena:
+1. You size the reactor at compile time and carve it out of a memory:
 
    ```cpp
    constexpr reactor::reactor_config_t config{
@@ -48,12 +48,12 @@ request arrives.
    };
 
    constexpr std::size_t bytes_k = reactor::precompute(config);
-   arena::arena_config_t arena_config;
-   arena_config.size_ = bytes_k;
-   arena::arena_t arena{arena_config};
+   memory::memory_config_t memory_config;
+   memory_config.size_ = bytes_k;
+   memory::memory_t memory{memory_config};
 
    reactor::reactor_t reactor;
-   reactor.bind_arena(arena, config);
+   reactor.bind_memory(memory, config);
    ```
 
 2. You ask for queues by name. The same name always gives you the same queue, so
@@ -88,7 +88,7 @@ using reactor_fn_t = void (*)(void *ctx, const op_result_t &result);
 ```
 
 You keep the state where it belongs — usually in a struct you carved from the
-arena — and the handler receives a pointer to it. The framework moves a pointer
+memory — and the handler receives a pointer to it. The framework moves a pointer
 and a function address; nothing is copied and nothing is allocated.
 
 ```cpp
@@ -121,13 +121,13 @@ socket.recv(buffer, sizeof(buffer), on_read, &session, /*strand_id=*/session.id_
 socket.send(reply, reply_len, on_write, &session, /*strand_id=*/session.id_);
 ```
 
-The strand lives in the arena and is manipulated only by the thread that owns
+The strand lives in the memory and is manipulated only by the thread that owns
 the queue, so no lock is involved. The cost is one flag check per operation.
 
 ## What the memory budget buys you
 
 The reactor's whole state — queues, operations, sockets, strands — is carved
-from an arena at `bind_arena`. `precompute(config)` returns the exact number of
+from a memory at `bind_memory`. `precompute(config)` returns the exact number of
 bytes that will be needed, and it is a `constexpr` function:
 
 ```cpp
@@ -136,22 +136,22 @@ static_assert(bytes_k > 0);
 ```
 
 That number is not an estimate. The reactor builds the same table of object
-descriptors for the calculation and for the allocation, so the arena you size
-here is exactly the arena it needs:
+descriptors for the calculation and for the allocation, so the memory you size
+here is exactly the memory it needs:
 
 ```cpp
-arena::arena_t arena{arena::arena_config_t{.size_ = reactor::precompute(config)}};
-reactor.bind_arena(arena, config);
+memory::memory_t memory{memory::memory_config_t{.size_ = reactor::precompute(config)}};
+reactor.bind_memory(memory, config);
 ```
 
 The same contract applies to every module in the framework, which is what lets
-you size one arena for all of them:
+you size one memory for all of them:
 
 ```cpp
 constexpr std::size_t total_k =
-    arena::merge_reservations(
-        arena::make_reservation<environment::environment_module_t>("environment", env_k),
-        arena::make_reservation<reactor::reactor_module_t>("reactor", rea_k));
+    memory::merge_reservations(
+        memory::make_reservation<environment::environment_module_t>("environment", env_k),
+        memory::make_reservation<reactor::reactor_module_t>("reactor", rea_k));
 ```
 
 See [Memory reservation](../memory/reservation) for the contract every module
@@ -201,5 +201,5 @@ needs neither root nor emulation.
 ## Where to go next
 
 - [The API](api) — every function, its contract and its failure modes.
-- [Configuration](configuration) — the knobs and how to size the arena.
+- [Configuration](configuration) — the knobs and how to size the memory.
 - [Internals](internals) — the ring, the operation pool and the strand protocol.

@@ -5,8 +5,8 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "frameworkcpp/arena/shard.hpp"
 #include "frameworkcpp/concurrency.hpp"
+#include "frameworkcpp/memory/shard.hpp"
 
 namespace frameworkcpp::reactor {
 
@@ -22,10 +22,10 @@ inline constexpr std::size_t max_reactor_sockets_k = 4096;
 // Número máximo de strands por reactor.
 inline constexpr std::size_t max_reactor_strands_k = 4096;
 
-// Número de specs que el reactor carvea del arena.
+// Número de specs que el reactor carvea del memory.
 inline constexpr std::size_t reactor_spec_count_k = 10;
 
-// Tag del shard del reactor dentro de la arena.
+// Tag del shard del reactor dentro de la memory.
 inline constexpr std::uint64_t reactor_shard_tag_k = 0x72656163746f72ULL; // "reactor"
 
 // Backend de eventos que usa el reactor.
@@ -35,7 +35,7 @@ inline constexpr std::uint64_t reactor_shard_tag_k = 0x72656163746f72ULL; // "re
 // Linux, incluidos los que no exponen io_uring (emulacion, kernels viejos).
 enum class backend_t : std::uint8_t {
   auto_ = 0,     // io_uring si el kernel lo expone, si no epoll
-  io_uring_ = 1, // exigir io_uring: bind_arena falla si no esta
+  io_uring_ = 1, // exigir io_uring: bind_memory falla si no esta
   epoll_ = 2,    // exigir epoll
 }; // enum class backend_t
 

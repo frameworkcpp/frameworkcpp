@@ -21,14 +21,14 @@ and a reader can tell at a glance what a name is.
 
 | Kind | Rule | Example |
 | --- | --- | --- |
-| Class / struct / union | `_t` suffix | `arena_t`, `object_spec_t` |
+| Class / struct / union | `_t` suffix | `memory_t`, `object_spec_t` |
 | Enum (the type) | `_t` suffix | `concurrency_model_t` |
 | Exception class | `exception` suffix (not `_t`) | `arena_overflow_exception` |
 | Enumerator | `_` suffix | `single_thread_` |
 | Type alias | `_t` suffix | `arena_byte_allocator_t` |
 | Function-pointer alias | `_fn` suffix | `arena_warning_fn` |
 | Data member (public or private) | `_` suffix | `capacity_`, `hdr_` |
-| Constant (namespace, class or local) | `_k` suffix | `max_arena_shards_k` |
+| Constant (namespace, class or local) | `_k` suffix | `max_memory_shards_k` |
 | Local variable | `_` prefix | `_iterator` |
 | Local constant | `_` prefix + `_k` suffix | `_limit_k` |
 | Parameter | no prefix/suffix | `bytes`, `alignment` |

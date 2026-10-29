@@ -8,7 +8,7 @@
 #include <string_view>
 
 // Internal layout of the environment module. Every structure here is carved
-// into the module's arena shard as a fixed-capacity array; nothing is ever
+// into the module's memory shard as a fixed-capacity array; nothing is ever
 // allocated on the heap. Published cells are immutable: a set_env builds a new
 // value cell and links to it, it never edits a live one. Retired cells are
 // recycled by an epoch reader (see environment.hpp): a cell is only reused once

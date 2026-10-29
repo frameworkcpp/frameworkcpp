@@ -6,15 +6,15 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "frameworkcpp/arena/bucket.hpp"
-#include "frameworkcpp/arena/detail/layout.hpp"
+#include "frameworkcpp/memory/bucket.hpp"
+#include "frameworkcpp/memory/detail/layout.hpp"
 
-namespace frameworkcpp::arena {
-class arena_shard_t {
+namespace frameworkcpp::memory {
+class memory_shard_t {
   detail::shard_header_t *hdr_ = nullptr;
 
   public:
-  arena_shard_t() = default;
+  memory_shard_t() = default;
 
   explicit operator bool() const noexcept { return hdr_ != nullptr; }
 
@@ -73,7 +73,7 @@ class arena_shard_t {
     detail::free_block(get_bytes(), _descriptor, _index_k);
   }
 
-  arena_bucket_t get_bucket(std::uint64_t tag, concurrency_model_t model) {
+  memory_bucket_t get_bucket(std::uint64_t tag, concurrency_model_t model) {
     if (hdr_ == nullptr)
       return {};
     const auto _count_k = hdr_->bucket_count_;
@@ -122,7 +122,7 @@ class arena_shard_t {
   }
 
   private:
-  friend class arena_t;
+  friend class memory_t;
 
   [[nodiscard]] std::byte *get_bytes() const noexcept {
     return reinterpret_cast<std::byte *>(hdr_);
@@ -143,7 +143,7 @@ class arena_shard_t {
     auto *_descriptor = &get_buckets()[bucket];
     return detail::take_block(get_bytes(), *_descriptor, bucket, hdr_->shard_id_);
   }
-}; // class arena_shard_t
+}; // class memory_shard_t
 
 template <std::size_t N> constexpr std::size_t shard_footprint(const object_spec_t (&specs)[N]) {
   return detail::slice_bytes_c(specs);
@@ -156,4 +156,4 @@ constexpr std::size_t round_to_page(std::size_t bytes) {
 constexpr bool is_valid_footprint(std::size_t bytes) {
   return bytes > 0;
 }
-} // namespace frameworkcpp::arena
+} // namespace frameworkcpp::memory

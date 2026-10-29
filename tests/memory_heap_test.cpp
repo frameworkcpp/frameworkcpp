@@ -7,7 +7,7 @@
 
 #include <gtest/gtest.h>
 
-#include "frameworkcpp/arena/arena.hpp"
+#include "frameworkcpp/memory/memory.hpp"
 
 namespace {
 
@@ -29,9 +29,9 @@ std::atomic<std::uint64_t> g_allocations{0};
 #endif
 
 #if defined(FRAMEWORKCPP_SANITIZED)
-namespace frameworkcpp::arena::test {
+namespace frameworkcpp::memory::test {
 #else
-// Count every heap allocation in this TU so the arena can prove it never
+// Count every heap allocation in this TU so the memory can prove it never
 // touches the heap once it is up: create_shard, bucket allocate/deallocate and
 // the ptr/allocator helpers must all be heap-free. Disabled under ASan/TSan,
 // whose runtimes define their own operator new/delete.
@@ -68,23 +68,23 @@ void operator delete[](void *pointer, [[maybe_unused]] std::size_t size) noexcep
   std::free(pointer);
 }
 
-namespace frameworkcpp::arena::test {
+namespace frameworkcpp::memory::test {
 #endif
 
 struct heap_holder_t {
   std::uint32_t value_ = 0;
 }; // struct heap_holder_t
 
-TEST(ArenaHeap, NoHeapOnShardCarveAndOps) {
+TEST(MemoryHeap, NoHeapOnShardCarveAndOps) {
   const auto _before_k = g_allocations.load(std::memory_order_relaxed);
 
-  arena_config_t _config;
+  memory_config_t _config;
   _config.size_ = 256 * 1024;
-  arena_t _arena{_config};
+  memory_t _memory{_config};
 
-  auto _shard = _arena.create_shard(1,
-                                    {{0, 64, alignof(std::max_align_t), 128},
-                                     {1, sizeof(heap_holder_t), alignof(heap_holder_t), 8}});
+  auto _shard = _memory.create_shard(1,
+                                     {{0, 64, alignof(std::max_align_t), 128},
+                                      {1, sizeof(heap_holder_t), alignof(heap_holder_t), 8}});
 
   ASSERT_TRUE(static_cast<bool>(_shard));
 
@@ -93,37 +93,37 @@ TEST(ArenaHeap, NoHeapOnShardCarveAndOps) {
   *_pointer = 42;
   _shard.deallocate(_pointer);
 
-  auto _unique = make_arena_unique_ptr<heap_holder_t>(_shard);
+  auto _unique = make_memory_unique_ptr<heap_holder_t>(_shard);
   ASSERT_TRUE(static_cast<bool>(_unique));
 
-  auto _shared = make_arena_shared_ptr<int>(_shard, 7);
+  auto _shared = make_memory_shared_ptr<int>(_shard, 7);
   ASSERT_TRUE(static_cast<bool>(_shared));
   EXPECT_EQ(*_shared, 7);
 
-  arena_allocator_t<int> _allocator{_shard};
+  memory_allocator_t<int> _allocator{_shard};
   auto *_vector_memory = _allocator.allocate(3);
   EXPECT_NE(_vector_memory, nullptr);
   _allocator.deallocate(_vector_memory, 3);
 
-  EXPECT_EQ(_arena.is_soft_limit_exceeded(), false);
+  EXPECT_EQ(_memory.is_soft_limit_exceeded(), false);
   EXPECT_EQ(g_allocations.load(std::memory_order_relaxed), _before_k);
 }
 
-TEST(ArenaHeap, NoHeapOnMultiRegionGrowth) {
+TEST(MemoryHeap, NoHeapOnMultiRegionGrowth) {
   const auto _before_k = g_allocations.load(std::memory_order_relaxed);
 
-  arena_config_t _config;
+  memory_config_t _config;
   _config.size_ = 4096; // tiny first region -> each big shard forces a new mmap
-  arena_t _arena{_config};
+  memory_t _memory{_config};
 
   for (std::uint64_t _index = 0; _index < 16; ++_index) {
-    auto _shard = _arena.create_shard(_index, {{0, 256, alignof(std::uint32_t), 256}});
+    auto _shard = _memory.create_shard(_index, {{0, 256, alignof(std::uint32_t), 256}});
     ASSERT_TRUE(static_cast<bool>(_shard));
   }
 
-  EXPECT_EQ(_arena.get_shard_count(), 16U);
-  EXPECT_GT(_arena.get_capacity(), _config.size_);
+  EXPECT_EQ(_memory.get_shard_count(), 16U);
+  EXPECT_GT(_memory.get_capacity(), _config.size_);
   EXPECT_EQ(g_allocations.load(std::memory_order_relaxed), _before_k);
 }
 
-} // namespace frameworkcpp::arena::test
+} // namespace frameworkcpp::memory::test

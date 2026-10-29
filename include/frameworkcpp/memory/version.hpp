@@ -2,7 +2,7 @@
 
 #pragma once
 
-namespace frameworkcpp::arena {
+namespace frameworkcpp::memory {
 
 [[nodiscard]] constexpr int get_version_major() noexcept {
   return 1;
@@ -22,4 +22,4 @@ namespace frameworkcpp::arena {
 #endif
 }
 
-} // namespace frameworkcpp::arena
+} // namespace frameworkcpp::memory

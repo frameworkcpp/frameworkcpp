@@ -17,7 +17,7 @@ namespace frameworkcpp::reactor::detail {
 static_assert(std::atomic<std::size_t>::is_always_lock_free,
               "the operation ring needs lock-free size_t atomics");
 
-// Cola de operaciones pre-reservadas en arena. El modelo se elige al
+// Cola de operaciones pre-reservadas en memory. El modelo se elige al
 // inicializarla y tiene dos ejes independientes:
 //
 //   producers_: cuantos hilos empujan. single_thread_ usa el camino serial;
@@ -49,7 +49,7 @@ class op_queue_t {
   op_queue_t &operator=(op_queue_t &&) = delete;
   ~op_queue_t() = default;
 
-  // Pre-reserva slots y secuencias en arena. `capacity` debe ser potencia de
+  // Pre-reserva slots y secuencias en memory. `capacity` debe ser potencia de
   // dos. `sequence` puede ser nullptr para los modelos que no lo usan.
   bool init(op_t **slots,
             std::atomic<std::size_t> *sequence,

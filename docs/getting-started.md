@@ -13,9 +13,9 @@ pull in only the ones you use.
 
 ```mermaid
 flowchart TD
-    fc["FrameworkCpp — header-only C++20"] --> mem["memory — arena, shards, buckets, smart pointers"]
-    fc --> env["environment — dotenv-style config on the arena"]
-    fc --> rea["reactor — io_uring event loops on the arena"]
+    fc["FrameworkCpp — header-only C++20"] --> mem["memory — memory, shards, buckets, smart pointers"]
+    fc --> env["environment — dotenv-style config on the memory"]
+    fc --> rea["reactor — io_uring event loops on the memory"]
     fc --> more["more modules — planned"]
 ```
 
@@ -84,9 +84,9 @@ target_link_libraries(app PRIVATE frameworkcpp::frameworkcpp)
 
 int main()
 {
-    frameworkcpp::arena::arena_t arena;
+    frameworkcpp::memory::memory_t memory;
     // carve a shard (tag 1) with one bucket (tag 0): 64 slots of int.
-    auto shard = arena.create_shard(1, {{0, sizeof(int), alignof(int), 64}});
+    auto shard = memory.create_shard(1, {{0, sizeof(int), alignof(int), 64}});
 
     auto *p = shard.allocate<int>();   // no malloc, no lock
     shard.deallocate(p);
@@ -101,12 +101,12 @@ reach for the granular headers when you only need one and want faster builds.
 The documentation is organised by module, and each section reads top to bottom:
 the idea first, then the pieces, then the details.
 
-- [Memory](/memory/) — the arena-backed memory model: shards, buckets,
+- [Memory](/memory/) — the memory-backed memory model: shards, buckets,
   concurrency models and smart pointers.
 - [Environment](/environment/) — a dotenv-style configuration store built on top
   of the memory module.
 - [Reactor](/reactor/) — io_uring event loops with lock-free queues and
-  arena-carved memory.
+  memory-carved memory.
 
 More modules are on the way, and the menu grows with them. If you want to write
 a page yourself, start with [Writing Documentation](/contribute/documentation).

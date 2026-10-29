@@ -8,7 +8,7 @@
 #include <string_view>
 #include <sys/socket.h>
 
-#include "frameworkcpp/arena/arena.hpp"
+#include "frameworkcpp/memory/memory.hpp"
 #include "frameworkcpp/reactor/detail/state.hpp"
 #include "frameworkcpp/reactor/detail/types.hpp"
 #include "frameworkcpp/reactor/reactor_config.hpp"
@@ -87,7 +87,7 @@ class queue_t {
   [[nodiscard]] std::size_t pending_ops() const noexcept;
 }; // class queue_t
 
-// Socket registrado en el io_uring de una queue. Zero-copy: buffer en arena.
+// Socket registrado en el io_uring de una queue. Zero-copy: buffer en memory.
 class socket_t {
   friend class reactor_t;
 
@@ -199,9 +199,9 @@ class reactor_t {
   reactor_t &operator=(reactor_t &&) = delete;
   ~reactor_t();
 
-  // Carve todas las estructuras del reactor desde `arena` una sola vez.
-  // Todo el hot path usa memoria de arena; cero malloc/new/delete.
-  bool bind_arena(arena::arena_t &arena, const reactor_config_t &config) noexcept;
+  // Carve todas las estructuras del reactor desde `memory` una sola vez.
+  // Todo el hot path usa memoria de memory; cero malloc/new/delete.
+  bool bind_memory(memory::memory_t &memory_owner, const reactor_config_t &config) noexcept;
 
   [[nodiscard]] bool initialized() const noexcept;
 
@@ -331,14 +331,14 @@ namespace frameworkcpp::reactor {
 static_assert(std::atomic<std::uint64_t>::is_always_lock_free,
               "the reactor needs lock-free 64-bit atomics");
 
-// Descriptors de los buckets que el reactor carvea del arena. Es la única
-// fuente de verdad: `precompute` y `bind_arena` usan la misma tabla, así que
+// Descriptors de los buckets que el reactor carvea del memory. Es la única
+// fuente de verdad: `precompute` y `bind_memory` usan la misma tabla, así que
 // el tamaño calculado en compile time coincide exactamente con el reservado.
 //
-// Cada spec es un bloque contiguo (count = 1): la arena asigna un bloque del
+// Cada spec es un bloque contiguo (count = 1): la memory asigna un bloque del
 // tamaño pedido, no N bloques. Los elementos se placement-new dentro.
 constexpr void make_specs(const reactor_config_t &config,
-                          arena::object_spec_t (&specs)[reactor_spec_count_k]) {
+                          memory::object_spec_t (&specs)[reactor_spec_count_k]) {
   const std::size_t _total_ops_k = config.queues_ * config.max_jobs_per_queue_;
   const std::size_t _total_strands_k = config.queues_ * config.max_strands_;
   const std::size_t _total_timers_k = config.queues_ * config.max_timers_per_queue_;
@@ -377,34 +377,34 @@ constexpr void make_specs(const reactor_config_t &config,
 }
 
 // Contrato estándar de reserva de memoria en tiempo de compilación.
-// Devuelve los bytes EXACTOS que reactor necesita carvear del arena para el
-// config dado. Usable en constexpr antes de construir el arena_t.
+// Devuelve los bytes EXACTOS que reactor necesita carvear del memory para el
+// config dado. Usable en constexpr antes de construir el memory_t.
 //
 // Los rings de io_uring no se cuentan: el kernel los mapea por su cuenta, no
-// salen de la arena del usuario.
+// salen de la memory del usuario.
 constexpr std::size_t precompute(const reactor_config_t &config) noexcept {
-  arena::object_spec_t _specs[reactor_spec_count_k] = {};
+  memory::object_spec_t _specs[reactor_spec_count_k] = {};
   make_specs(config, _specs);
-  return arena::shard_footprint(_specs);
+  return memory::shard_footprint(_specs);
 }
 
-// El presupuesto total del arena que el reactor necesita: su footprint
+// El presupuesto total del memory que el reactor necesita: su footprint
 // redondeado a página, más `extra_bytes` para lo que quieras carvear en la
-// misma arena.
-constexpr std::size_t get_reactor_arena_bytes(const reactor_config_t &config,
-                                              std::size_t extra_bytes = 0) {
-  return arena::round_to_page(precompute(config) + extra_bytes);
+// misma memory.
+constexpr std::size_t get_reactor_memory_bytes(const reactor_config_t &config,
+                                               std::size_t extra_bytes = 0) {
+  return memory::round_to_page(precompute(config) + extra_bytes);
 }
 
-constexpr arena::arena_config_t get_reactor_arena_config(const reactor_config_t &config,
-                                                         std::size_t extra_bytes = 0) {
-  arena::arena_config_t _arena_config{};
-  _arena_config.size_ = get_reactor_arena_bytes(config, extra_bytes);
-  return _arena_config;
+constexpr memory::memory_config_t get_reactor_memory_config(const reactor_config_t &config,
+                                                            std::size_t extra_bytes = 0) {
+  memory::memory_config_t _memory_config{};
+  _memory_config.size_ = get_reactor_memory_bytes(config, extra_bytes);
+  return _memory_config;
 }
 
 // Adaptador del módulo al contrato estándar: permite usar
-// arena::make_reservation<reactor_module_t>(...) y arena::merge_reservations.
+// memory::make_reservation<reactor_module_t>(...) y memory::merge_reservations.
 struct reactor_module_t {
   static constexpr std::size_t precompute(const reactor_config_t &config) noexcept {
     return reactor::precompute(config);

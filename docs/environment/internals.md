@@ -2,7 +2,7 @@
 
 You do not need any of this to *use* the store. Read it when you want to reason
 about why a read is cheap, what the footprint really is, or how the concurrency
-guarantees hold — the structures carved into the arena, the version protocol,
+guarantees hold — the structures carved into the memory store, the version protocol,
 and the memory ordering that keeps it correct.
 
 Everything below lives in `namespace frameworkcpp::environment::detail`, in
@@ -76,7 +76,7 @@ current value. A thread that resolves a key to slot `i` can cache the value at
 // environment.hpp
 
 struct control_t {
-    arena::arena_shard_t shard_;
+    memory::memory_shard_t shard_;
     std::atomic<key_cell_t *>   *key_table_;   // [slots]
     std::atomic<value_cell_t *> *global_;      // [slots]
     patch_t                     *journal_;     // [journal_size]
@@ -193,21 +193,21 @@ the first time it touches the store, and the slot is marked inactive again when
 its thread exits, so slots are recycled rather than burned. A view re-publishes
 its version to the reclaimer only when it actually advanced, so the steady-state
 read path touches no shared atomic beyond the `version_` load. The `thread_local`
-guard is keyed by an init/shutdown epoch, so it never touches a dead arena.
+guard is keyed by an init/shutdown epoch, so it never touches a dead memory.
 
 ## Lifetime of a returned view
 
 Because cells are recycled, a `get_env` result is valid **until the next
-`get_env`/`set_env` on the same thread** — not for the arena's lifetime. The
+`get_env`/`set_env` on the same thread** — not for the memory store's lifetime. The
 reclaimer honors this exactly: a cell cannot be recycled while the thread that
 holds a view of it has not advanced, so the value is alive for as long as it was
 promised. Read it, copy it, or compare it — but do not stash it across calls.
 
 
-## Heap-free, like the arena
+## Heap-free, like the memory store
 
-`init` uses `arena::create_shard`, `allocate_tagged` and `mmap` — never
-`new`/`malloc`. `get_env` and `set_env` only touch arena memory and atomics.
+`init` uses `memory::create_shard`, `allocate_tagged` and `mmap` — never
+`new`/`malloc`. `get_env` and `set_env` only touch memory and atomics.
 The test suite proves it: `tests/environment_heap_test.cpp` overrides
 `operator new`/`delete` and asserts that `init`, `get_env` and `set_env`
 allocate **zero** bytes on the heap.

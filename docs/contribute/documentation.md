@@ -13,11 +13,11 @@ paragraph.
 Open with the reader's situation, not with the name of a type. Name the pain in
 plain language first; introduce the framework's answer in one sentence after.
 
-> **Weak:** "`arena_t` is the class that manages memory."
+> **Weak:** "`memory_t` is the class that manages memory."
 >
 > **Better:** "On a real-time system, `malloc` is a gamble: sometimes it returns
 > in microseconds, sometimes in milliseconds, and that spike is what misses your
-> deadline. `arena_t` reserves memory once and hands it out in slices, so an
+> deadline. `memory_t` reserves memory once and hands it out in slices, so an
 > allocation never touches the heap."
 
 The reader should recognise their own problem before they meet your API.
@@ -34,8 +34,8 @@ Never drop a code block without telling the reader what it does. Lead in with a
 sentence that ends in a colon and states the outcome:
 
 ```cpp
-arena_t arena;
-auto shard = arena.create_shard(1, {{0, sizeof(Command), alignof(Command), 512}});
+memory_t memory;
+auto shard = memory.create_shard(1, {{0, sizeof(Command), alignof(Command), 512}});
 auto *cmd = shard.allocate<Command>();   // no malloc, no lock, no exception
 ```
 
@@ -103,7 +103,7 @@ Tell the reader when **not** to use what you are describing. Naming the limit
 builds trust and prevents misuse:
 
 > If your workload allocates and frees unpredictable, wildly different sizes, an
-> arena will fragment your budget; a fixed-size pool fits better.
+> memory will fragment your budget; a fixed-size pool fits better.
 
 ## Voice and tone
 
@@ -119,7 +119,7 @@ builds trust and prevents misuse:
 ## Code examples
 
 - Every fence carries a language: `cpp`, `bash`, `cmake`, `text`, `mermaid`.
-- Use the framework's real names (`arena_t`, `get_capacity()`), not placeholders.
+- Use the framework's real names (`memory_t`, `get_capacity()`), not placeholders.
 - Prefer complete, copy-pasteable snippets over fragments.
 - Comment the non-obvious line, not the obvious one.
 
