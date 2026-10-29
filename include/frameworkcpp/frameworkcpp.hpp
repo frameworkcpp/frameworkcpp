@@ -3,7 +3,7 @@
 #pragma once
 
 // Umbrella header: pulls in every shipped module and their version entry
-// points. Prefer the granular headers (e.g. <frameworkcpp/arena/arena.hpp>) for
+// points. Prefer the granular headers (e.g. <frameworkcpp/memory/memory.hpp>) for
 // faster builds when you only need one module.
 //
 // The reactor module is NOT included here: it talks to io_uring through
@@ -11,8 +11,8 @@
 //
 //     #include <frameworkcpp/reactor/reactor.hpp>   // link with -luring
 
-#include "frameworkcpp/arena/arena.hpp"
-#include "frameworkcpp/arena/module_memory.hpp"
-#include "frameworkcpp/arena/version.hpp"
 #include "frameworkcpp/environment/environment.hpp"
 #include "frameworkcpp/environment/version.hpp"
+#include "frameworkcpp/memory/memory.hpp"
+#include "frameworkcpp/memory/module_memory.hpp"
+#include "frameworkcpp/memory/version.hpp"

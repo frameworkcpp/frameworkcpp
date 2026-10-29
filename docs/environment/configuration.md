@@ -3,7 +3,7 @@
 The store is sized up front. You hand `init` an `environment_config_t` and it
 carves a shard with exactly those capacities — there is nothing to grow and
 nothing to `malloc` afterwards. This page explains each knob and how to derive
-the arena budget from them.
+the memory budget from them.
 
 ```cpp
 #include <frameworkcpp/environment/environment.hpp>
@@ -31,7 +31,7 @@ struct environment_config_t {
 | `read_process_env_` | Whether `init` inherits the process environment. | Set `false` for a file-only, deterministic store. |
 | `dotenv_path_` | The `.env` file to load at `init`. | `nullptr` means "process environment only". |
 
-All fields have sensible defaults, so `init(arena)` works with no config at all:
+All fields have sensible defaults, so `init(memory)` works with no config at all:
 the store then holds the process environment and nothing else.
 
 ## Unbounded updates, bounded memory
@@ -50,30 +50,30 @@ a live view stops advancing and pins every retired cell. That is the bounded
 back-pressure, and it clears as soon as the lagging view reads again or its
 thread exits.
 
-## Sizing the arena
+## Sizing the memory
 
 `get_environment_footprint(config)` returns the exact number of bytes the
 module's shard will occupy, and it is `constexpr` — you can derive the budget at
-compile time, exactly like the arena's own `shard_footprint` / `round_to_page`:
+compile time, exactly like the memory's own `shard_footprint` / `round_to_page`:
 
 ```cpp
 constexpr environment::environment_config_t env_k{};
 
 constexpr std::size_t env_bytes_k = environment::get_environment_footprint(env_k);
-constexpr std::size_t arena_bytes_k = environment::get_environment_arena_bytes(env_k, 64 * 1024);
+constexpr std::size_t memory_bytes_k = environment::get_environment_memory_bytes(env_k, 64 * 1024);
 
-static_assert(arena_bytes_k % 4096 == 0);   // page aligned
-static_assert(arena_bytes_k >= env_bytes_k);
+static_assert(memory_bytes_k % 4096 == 0);   // page aligned
+static_assert(memory_bytes_k >= env_bytes_k);
 ```
 
-Or get a ready-made `arena_config_t`:
+Or get a ready-made `memory_config_t`:
 
 ```cpp
-arena::arena_t arena{environment::get_environment_arena_config(env_k)};
-environment::init(arena, env_k);
+memory::memory_t memory{environment::get_environment_memory_config(env_k)};
+environment::init(memory, env_k);
 ```
 
-`get_environment_arena_bytes(config, extra)` is
+`get_environment_memory_bytes(config, extra)` is
 `round_to_page(footprint + extra)`, so pass any headroom you want for other
 shards as `extra`.
 
@@ -84,7 +84,7 @@ shards as `extra`.
 ```cpp
 environment_config_t config;
 config.dotenv_path_ = ".env";
-environment::init(arena, config);
+environment::init(memory, config);
 ```
 
 **Production, file driven** — ignore the host environment and be explicit:
@@ -95,7 +95,7 @@ config.read_process_env_ = false;
 config.max_keys_ = 128;
 config.value_cells_ = 256;
 config.dotenv_path_ = "/etc/myapp/app.env";
-environment::init(arena, config);
+environment::init(memory, config);
 ```
 
 **Many short-lived threads** — raise the view pool so each worker keeps its
@@ -105,7 +105,7 @@ cache:
 environment_config_t config;
 config.max_threads_ = 512;
 config.dotenv_path_ = "app.env";
-environment::init(arena, config);
+environment::init(memory, config);
 ```
 
 ## Observing the store

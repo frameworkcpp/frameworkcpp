@@ -9,12 +9,12 @@ as one `object_spec_t` entry, and you later grab a handle to it with
 `shard.get_bucket(tag, concurrency_model_t)`.
 
 ```cpp
-#include <frameworkcpp/arena/arena.hpp>   // to build the arena + shard in the examples
+#include "frameworkcpp/memory/memory.hpp">   // to build the memory store + shard in the examples
 ```
 
-The handle itself — `arena_bucket_t` — lives in
-`<frameworkcpp/arena/bucket.hpp>`; include that directly when you receive a
-bucket without building the arena.
+The handle itself — `memory_bucket_t` — lives in
+`<frameworkcpp/memory/bucket.hpp>`; include that directly when you receive a
+bucket without building the memory store.
 
 ## Declaring a bucket
 
@@ -24,7 +24,7 @@ becomes one bucket:
 ```cpp
 enum class bucket_tag : std::uint64_t { commands_ = 0, payloads_ = 1 };
 
-auto shard = arena.create_shard(
+auto shard = memory.create_shard(
     1, // shard tag
     {
         // { tag,               object_size,        align, count }
@@ -38,7 +38,7 @@ auto shard = arena.create_shard(
 ## Holding a bucket
 
 ```cpp
-arena_bucket_t get_bucket(std::uint64_t tag, concurrency_model_t model);
+memory_bucket_t get_bucket(std::uint64_t tag, concurrency_model_t model);
 ```
 
 - Pass the **bucket tag** you declared, and the **concurrency model** this
@@ -75,10 +75,10 @@ flowchart LR
 ## A full example
 
 ```cpp
-using namespace frameworkcpp::arena;
+using namespace frameworkcpp::memory;
 
-arena_t arena;
-auto shard = arena.create_shard(
+memory_t memory;
+auto shard = memory.create_shard(
     1,
     {{0, sizeof(std::uint64_t), alignof(std::uint64_t), 1024}}); // one bucket, tag 0
 

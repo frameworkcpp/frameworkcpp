@@ -21,7 +21,7 @@ class reactor_t {
     reactor_t &operator=(const reactor_t &) = delete;
     ~reactor_t();
 
-    bool bind_arena(arena::arena_t &arena, const reactor_config_t &config) noexcept;
+    bool bind_memory(memory::memory_t &memory, const reactor_config_t &config) noexcept;
     [[nodiscard]] bool initialized() const noexcept;
 
     queue_t *get_or_create(std::string_view name) const noexcept;
@@ -56,26 +56,26 @@ class reactor_t {
 }
 ```
 
-## bind_arena
+## bind_memory
 
 ```cpp
-bool bind_arena(arena::arena_t &arena, const reactor_config_t &config) noexcept;
+bool bind_memory(memory::memory_t &memory, const reactor_config_t &config) noexcept;
 ```
 
-Carves the reactor's state out of `arena`: one control block per queue, the
+Carves the reactor's state out of `memory`: one control block per queue, the
 operation pool, the socket table and the strand table. Call it once, from a
 single thread, before you post anything.
 
-- Returns `false` when the arena has no room for the shard, when an `io_uring`
+- Returns `false` when the memory has no room for the shard, when an `io_uring`
   ring cannot be created, or when the reactor is already bound.
-- After it succeeds, `arena.get_used()` has grown by exactly
+- After it succeeds, `memory.get_used()` has grown by exactly
   `precompute(config)` bytes.
-- The arena must outlive the reactor.
+- The memory must outlive the reactor.
 
 ```cpp
 reactor::reactor_t reactor;
-if (!reactor.bind_arena(arena, config))
-    throw std::runtime_error("reactor: not enough arena");
+if (!reactor.bind_memory(memory, config))
+    throw std::runtime_error("reactor: not enough memory");
 ```
 
 ## get_or_create
@@ -330,7 +330,7 @@ result when the operation completes.
 - Returns `false` when the queue's operation pool is exhausted or the queue
   handle is invalid. It never blocks and never throws.
 - `buffer` must stay valid until the handler runs. Put it in memory you own —
-  the arena, or a structure that outlives the operation.
+  the memory, or a structure that outlives the operation.
 - `strand_id` groups operations that must not overlap. `0` means "no strand".
 - `priority` is reserved for future use.
 
@@ -416,7 +416,7 @@ struct op_result_t {
 
 - **No closures.** Handlers are function pointers. If you want captured state,
   put it in a struct and pass its address.
-- **No dynamic allocation.** After `bind_arena`, no path allocates. That
+- **No dynamic allocation.** After `bind_memory`, no path allocates. That
   includes the operation pool: when it runs dry, `post` returns `false`.
 - **No blocking `post`.** A full pool is reported, not waited on.
 - **One operation per direction.** A socket can have one outstanding read and

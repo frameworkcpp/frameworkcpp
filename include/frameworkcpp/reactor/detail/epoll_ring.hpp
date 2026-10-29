@@ -15,7 +15,7 @@ namespace frameworkcpp::reactor::detail {
 // los que no exponen io_uring (emulacion con QEMU, kernels viejos). El
 // precio es una syscall por evento en vez de un lote.
 //
-// El array de eventos se reserva en el arena, asi que la espera no reserva
+// El array de eventos se reserva en el memory, asi que la espera no reserva
 // memoria: `wait` solo escribe sobre el buffer que ya existe.
 class epoll_ring_t {
   int epoll_fd_ = -1;
@@ -32,7 +32,7 @@ class epoll_ring_t {
       ::close(epoll_fd_);
   }
 
-  // Pre-reserva el array de eventos en arena. `capacity` es la cantidad de
+  // Pre-reserva el array de eventos en memory. `capacity` es la cantidad de
   // eventos que una espera puede devolver a la vez.
   [[nodiscard]] bool init() noexcept {
     if (epoll_fd_ >= 0)

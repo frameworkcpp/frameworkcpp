@@ -1,30 +1,30 @@
 # Allocators & std::pmr
 
 Sometimes you do not want to manage slots by hand — you want a `std::vector`,
-and you want its storage to come from the arena. That is what the allocator
-bridge is for: the arena talks the standard allocator language, so it can back
+and you want its storage to come from the memory store. That is what the allocator
+bridge is for: the memory store talks the standard allocator language, so it can back
 `std::vector`, `std::pmr::vector` and anything else that honours the C++20
 allocator contract.
 
 ```cpp
-#include <frameworkcpp/arena/arena_allocator.hpp>   // arena_allocator_t<T> + arena_memory_resource_t
-#include <frameworkcpp/arena/arena.hpp>             // to build the arena in the examples
+#include "frameworkcpp/memory/memory_allocator.hpp">   // memory_allocator_t<T> + memory_resource_t
+#include "frameworkcpp/memory/memory.hpp">             // to build the memory store in the examples
 ```
 
 ## The standard allocator
 
-`arena_allocator_t<T>` satisfies `std::allocator_traits`, so you drop it into a
+`memory_allocator_t<T>` satisfies `std::allocator_traits`, so you drop it into a
 container and the storage comes from a shard:
 
 ```cpp
-arena_allocator_t<int> alloc{shard};
-std::vector<int, arena_allocator_t<int>> values(alloc);
+memory_allocator_t<int> alloc{shard};
+std::vector<int, memory_allocator_t<int>> values(alloc);
 for (int i = 0; i < 100; ++i) values.push_back(i);
 ```
 
 ```mermaid
 flowchart LR
-    vec["std::vector / std::pmr::vector"] --> alloc["arena_allocator_t or arena_memory_resource_t"]
+    vec["std::vector / std::pmr::vector"] --> alloc["memory_allocator_t or memory_resource_t"]
     alloc --> shard["the shard you bound it to"]
     shard --> bucket["served by the smallest-fit bucket"]
 ```
@@ -45,11 +45,11 @@ A few behaviours worth knowing before you rely on it:
 ## PMR
 
 When the allocator has to be erased behind an interface — a `std::pmr` container
-holding a `memory_resource*` — use `arena_memory_resource_t`, a
+holding a `memory_resource*` — use `memory_resource_t`, a
 `std::pmr::memory_resource` over a shard:
 
 ```cpp
-arena_memory_resource_t resource{shard};
+memory_resource_t resource{shard};
 std::pmr::vector<std::uint64_t> values{
     std::pmr::polymorphic_allocator<std::uint64_t>(&resource)};
 for (std::uint64_t i = 0; i < 200; ++i) values.push_back(i);

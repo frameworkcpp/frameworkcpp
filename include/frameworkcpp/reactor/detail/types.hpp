@@ -27,7 +27,7 @@ struct op_result_t {
 }; // struct op_result_t
 
 // Firma de handler sin lambdas ni captura de heap.
-// `ctx` apunta a estado pre-reservado en arena; el dueño gestiona su vida.
+// `ctx` apunta a estado pre-reservado en memory; el dueño gestiona su vida.
 using reactor_fn_t = void (*)(void *ctx, const op_result_t &result);
 
 } // namespace frameworkcpp::reactor

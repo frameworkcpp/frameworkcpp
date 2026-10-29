@@ -1,8 +1,8 @@
 # Configuration
 
 The reactor is sized up front, like every other module in the framework. You
-hand `bind_arena` a `reactor_config_t` and it carves exactly that much space
-out of an arena.
+hand `bind_memory` a `reactor_config_t` and it carves exactly that much space
+out of a memory.
 
 ```cpp
 struct queue_concurrency_t {
@@ -26,7 +26,7 @@ struct reactor_config_t {
 | Field | What it bounds | Notes |
 | --- | --- | --- |
 | `queues_` | Number of named event loops. | Each one gets its own `io_uring` ring and its own thread. |
-| `workers_per_queue_` | Threads per queue. | One thread per queue is the only supported value; `bind_arena` rejects anything else. |
+| `workers_per_queue_` | Threads per queue. | One thread per queue is the only supported value; `bind_memory` rejects anything else. |
 | `max_jobs_per_queue_` | Operations in flight per queue. | The operation pool. When it is empty, `post` returns `false`. Must be a power of two. |
 | `max_sockets_` | Registered sockets. | A socket table entry is small, but the table is fixed. |
 | `max_strands_` | Distinct strand keys. | Strands are addressed modulo this number. |
@@ -53,7 +53,7 @@ The contract has two axes because producing and consuming are different jobs:
 `consumers_` is separate because the consumer side is not symmetric with the
 producer side. Today it must be `single_thread_`: each queue has one event loop,
 and the io_uring ring, timer heap and strands do not support several consumers.
-`bind_arena` rejects anything else, so the struct cannot promise concurrency
+`bind_memory` rejects anything else, so the struct cannot promise concurrency
 the reactor does not implement.
 
 `thread_safe_` locks only producers. The single consumer keeps using the serial
@@ -74,7 +74,7 @@ strand model is about submission, not about running two handlers at once.
 ```cpp
 enum class backend_t : std::uint8_t {
   auto_ = 0,     // io_uring si el kernel lo expone, si no epoll
-  io_uring_ = 1, // exigir io_uring: bind_arena falla si no esta
+  io_uring_ = 1, // exigir io_uring: bind_memory falla si no esta
   epoll_ = 2,    // exigir epoll
 };
 ```
@@ -94,7 +94,7 @@ milliseconds and wakes once per event, while `io_uring` waits in nanoseconds
 and reaps a batch. Timers therefore fire with millisecond precision under
 `epoll` and nanosecond precision under `io_uring`.
 
-## Sizing the arena
+## Sizing the memory
 
 `precompute(config)` returns the exact number of bytes the reactor's shard will
 occupy, and it is a `constexpr` function — you can derive the budget at compile
@@ -112,22 +112,22 @@ descriptors for the calculation and for the allocation. You can check that
 yourself:
 
 ```cpp
-arena::arena_config_t arena_config;
-arena_config.size_ = reactor::precompute(config);
-arena::arena_t arena{arena_config};
+memory::memory_config_t memory_config;
+memory_config.size_ = reactor::precompute(config);
+memory::memory_t memory{memory_config};
 
 reactor::reactor_t reactor;
-reactor.bind_arena(arena, config);
-assert(arena.get_used() == reactor::precompute(config));
+reactor.bind_memory(memory, config);
+assert(memory.get_used() == reactor::precompute(config));
 ```
 
 Or take the ready-made helpers:
 
 ```cpp
-arena::arena_t arena{reactor::get_reactor_arena_config(config)};
+memory::memory_t memory{reactor::get_reactor_memory_config(config)};
 ```
 
-`get_reactor_arena_bytes(config, extra)` is `round_to_page(footprint + extra)`,
+`get_reactor_memory_bytes(config, extra)` is `round_to_page(footprint + extra)`,
 so pass any headroom you want for other modules as `extra`.
 
 ## Sizing the operation pool
@@ -146,9 +146,9 @@ config.max_jobs_per_queue_ = 1024;   // ~1000 concurrent connections
 When the pool is empty, `post` returns `false`. That is your back-pressure
 signal: accept fewer connections, or raise the number.
 
-## Combining modules in one arena
+## Combining modules in one memory
 
-Every module exposes the same contract, so you can size one arena for all of
+Every module exposes the same contract, so you can size one memory for all of
 them:
 
 ```cpp
@@ -156,13 +156,13 @@ constexpr environment::environment_config_t env_k{};
 constexpr reactor::reactor_config_t rea_k{};
 
 constexpr std::size_t total_k =
-    arena::merge_reservations(
-        arena::make_reservation<environment::environment_module_t>("environment", env_k),
-        arena::make_reservation<reactor::reactor_module_t>("reactor", rea_k));
+    memory::merge_reservations(
+        memory::make_reservation<environment::environment_module_t>("environment", env_k),
+        memory::make_reservation<reactor::reactor_module_t>("reactor", rea_k));
 
-arena::arena_config_t arena_config;
-arena_config.size_ = arena::round_to_page(total_k);
-arena::arena_t arena{arena_config};
+memory::memory_config_t memory_config;
+memory_config.size_ = memory::round_to_page(total_k);
+memory::memory_t memory{memory_config};
 ```
 
 The contract is described in [Memory reservation](../memory/reservation).

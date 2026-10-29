@@ -2,11 +2,11 @@
 
 #pragma once
 
-// Umbrella header: pulls in the arena primitives and defines arena_t, the
+// Umbrella header: pulls in the memory primitives and defines memory_t, the
 // owner of the reserved memory and the shard carver. Grab just the pieces you
-// need with <frameworkcpp/arena/shard.hpp>, <frameworkcpp/arena/bucket.hpp>,
-// <frameworkcpp/arena/unique_ptr.hpp>, <frameworkcpp/arena/shared_ptr.hpp> or
-// <frameworkcpp/arena/arena_allocator.hpp>.
+// need with <frameworkcpp/memory/shard.hpp>, <frameworkcpp/memory/bucket.hpp>,
+// <frameworkcpp/memory/unique_ptr.hpp>, <frameworkcpp/memory/shared_ptr.hpp> or
+// <frameworkcpp/memory/memory_allocator.hpp>.
 
 #include <array>
 #include <atomic>
@@ -20,18 +20,18 @@
 #include <stdexcept>
 #include <utility>
 
-#include "frameworkcpp/arena/arena_allocator.hpp"
-#include "frameworkcpp/arena/bucket.hpp"
-#include "frameworkcpp/arena/config.hpp"
-#include "frameworkcpp/arena/detail/layout.hpp"
-#include "frameworkcpp/arena/detail/region.hpp"
-#include "frameworkcpp/arena/shard.hpp"
-#include "frameworkcpp/arena/shared_ptr.hpp"
-#include "frameworkcpp/arena/unique_ptr.hpp"
+#include "frameworkcpp/memory/bucket.hpp"
+#include "frameworkcpp/memory/config.hpp"
+#include "frameworkcpp/memory/detail/layout.hpp"
+#include "frameworkcpp/memory/detail/region.hpp"
+#include "frameworkcpp/memory/memory_allocator.hpp"
+#include "frameworkcpp/memory/shard.hpp"
+#include "frameworkcpp/memory/shared_ptr.hpp"
+#include "frameworkcpp/memory/unique_ptr.hpp"
 
-namespace frameworkcpp::arena {
-class arena_t {
-  friend class arena_shard_t;
+namespace frameworkcpp::memory {
+class memory_t {
+  friend class memory_shard_t;
 
   struct shard_entry_t {
     std::uint64_t tag_;
@@ -40,9 +40,9 @@ class arena_t {
   }; // struct shard_entry_t
 
   mutable std::mutex registry_mutex_;
-  arena_config_t config_;
-  std::array<detail::region_t, max_arena_regions_k> regions_ = {};
-  std::array<shard_entry_t, max_arena_shards_k> shards_ = {};
+  memory_config_t config_;
+  std::array<detail::region_t, max_memory_regions_k> regions_ = {};
+  std::array<shard_entry_t, max_memory_shards_k> shards_ = {};
   std::size_t region_count_ = 0;
   std::atomic<std::size_t> shard_count_{0};
   std::atomic<std::size_t> capacity_{0};
@@ -50,18 +50,18 @@ class arena_t {
   std::atomic<bool> soft_exceeded_{false};
 
   public:
-  arena_t() = default;
+  memory_t() = default;
 
-  explicit arena_t(const arena_config_t &config) : config_(config) {
+  explicit memory_t(const memory_config_t &config) : config_(config) {
     if (config_.hard_limit_ != 0 && config_.soft_limit_ > config_.hard_limit_)
-      throw std::invalid_argument("arena soft_limit must not exceed hard_limit");
-    if (config_.max_shards_ > max_arena_shards_k || config_.max_regions_ > max_arena_regions_k)
-      throw std::invalid_argument("arena registry capacity exceeds hard caps");
+      throw std::invalid_argument("memory soft_limit must not exceed hard_limit");
+    if (config_.max_shards_ > max_memory_shards_k || config_.max_regions_ > max_memory_regions_k)
+      throw std::invalid_argument("memory registry capacity exceeds hard caps");
   }
 
-  arena_shard_t create_shard(std::uint64_t tag, std::initializer_list<object_spec_t> specs);
-  arena_shard_t create_shard(std::uint64_t tag, std::span<const object_spec_t> specs);
-  arena_shard_t get_shard(std::uint64_t tag) const;
+  memory_shard_t create_shard(std::uint64_t tag, std::initializer_list<object_spec_t> specs);
+  memory_shard_t create_shard(std::uint64_t tag, std::span<const object_spec_t> specs);
+  memory_shard_t get_shard(std::uint64_t tag) const;
 
   [[nodiscard]] std::size_t get_shard_count() const noexcept;
   [[nodiscard]] std::size_t get_capacity() const noexcept;
@@ -76,24 +76,24 @@ class arena_t {
 
   private:
   detail::region_t *region_for(std::size_t bytes);
-  arena_shard_t build_shard(std::uint64_t tag, std::span<const object_spec_t> specs);
+  memory_shard_t build_shard(std::uint64_t tag, std::span<const object_spec_t> specs);
   [[noreturn]] void hard_overflow(std::size_t requested) const;
   void check_soft_limit() noexcept;
   std::byte *get_shard_base(std::uint32_t index) const;
-}; // class arena_t
+}; // class memory_t
 
-inline arena_shard_t arena_t::create_shard(std::uint64_t tag,
-                                           std::initializer_list<object_spec_t> specs) {
+inline memory_shard_t memory_t::create_shard(std::uint64_t tag,
+                                             std::initializer_list<object_spec_t> specs) {
   return create_shard(tag, std::span<const object_spec_t>(specs.begin(), specs.size()));
 }
 
-inline arena_shard_t arena_t::create_shard(std::uint64_t tag,
-                                           std::span<const object_spec_t> specs) {
+inline memory_shard_t memory_t::create_shard(std::uint64_t tag,
+                                             std::span<const object_spec_t> specs) {
   const std::lock_guard _lock_k{registry_mutex_};
   const auto _count_k = shard_count_.load(std::memory_order_relaxed);
   for (std::size_t _index = 0; _index < _count_k; ++_index) {
     if (shards_[_index].tag_ == tag) {
-      arena_shard_t _view;
+      memory_shard_t _view;
       _view.hdr_ = reinterpret_cast<detail::shard_header_t *>(get_shard_base(_index));
       return _view;
     }
@@ -101,19 +101,19 @@ inline arena_shard_t arena_t::create_shard(std::uint64_t tag,
   return build_shard(tag, specs);
 }
 
-inline arena_shard_t arena_t::get_shard(std::uint64_t tag) const {
+inline memory_shard_t memory_t::get_shard(std::uint64_t tag) const {
   const auto _count_k = shard_count_.load(std::memory_order_acquire);
   for (std::size_t _index = 0; _index < _count_k; ++_index) {
     if (shards_[_index].tag_ == tag) {
-      arena_shard_t _view;
+      memory_shard_t _view;
       _view.hdr_ = reinterpret_cast<detail::shard_header_t *>(get_shard_base(_index));
       return _view;
     }
   }
-  return arena_shard_t{};
+  return memory_shard_t{};
 }
 
-inline detail::region_t *arena_t::region_for(std::size_t bytes) {
+inline detail::region_t *memory_t::region_for(std::size_t bytes) {
   for (std::size_t _index = 0; _index < region_count_; ++_index) {
     auto &_region = regions_[_index];
     if (_region.can_fit(bytes))
@@ -139,30 +139,31 @@ inline detail::region_t *arena_t::region_for(std::size_t bytes) {
   return &_region;
 }
 
-[[noreturn]] inline void arena_t::hard_overflow(std::size_t requested) const {
+[[noreturn]] inline void memory_t::hard_overflow(std::size_t requested) const {
   if (config_.overflow_ == overflow_mode_t::abort_)
     std::abort();
-  throw arena_overflow_exception(requested, config_.hard_limit_);
+  throw memory_overflow_exception(requested, config_.hard_limit_);
 }
 
-inline void arena_t::check_soft_limit() noexcept {
+inline void memory_t::check_soft_limit() noexcept {
   if (config_.soft_limit_ == 0)
     return;
   const auto _reserved_k = get_capacity();
   if (_reserved_k >= config_.soft_limit_ &&
       !soft_exceeded_.exchange(true, std::memory_order_relaxed)) {
     if (config_.on_warning_ != nullptr)
-      config_.on_warning_("arena soft limit reached");
+      config_.on_warning_("memory soft limit reached");
   }
 }
 
-inline std::byte *arena_t::get_shard_base(std::uint32_t index) const {
+inline std::byte *memory_t::get_shard_base(std::uint32_t index) const {
   const auto &_entry = shards_[index];
   return regions_[_entry.region_index_].get_base() + _entry.slice_offset_;
 }
 
-inline arena_shard_t arena_t::build_shard(std::uint64_t tag, std::span<const object_spec_t> specs) {
-  arena_shard_t _view;
+inline memory_shard_t memory_t::build_shard(std::uint64_t tag,
+                                            std::span<const object_spec_t> specs) {
+  memory_shard_t _view;
   if (specs.empty())
     return _view;
   for (const auto &_spec : specs) {
@@ -256,21 +257,21 @@ inline arena_shard_t arena_t::build_shard(std::uint64_t tag, std::span<const obj
   return _view;
 }
 
-inline std::size_t arena_t::get_shard_count() const noexcept {
+inline std::size_t memory_t::get_shard_count() const noexcept {
   return shard_count_.load(std::memory_order_acquire);
 }
 
-inline std::size_t arena_t::get_capacity() const noexcept {
+inline std::size_t memory_t::get_capacity() const noexcept {
   return capacity_.load(std::memory_order_acquire);
 }
 
-// High-water mark of the bytes carved out of the regions. The arena never
+// High-water mark of the bytes carved out of the regions. The memory never
 // returns memory to a region, so this only grows.
-inline std::size_t arena_t::get_used() const noexcept {
+inline std::size_t memory_t::get_used() const noexcept {
   return used_.load(std::memory_order_acquire);
 }
 
-inline std::size_t arena_t::get_live() const noexcept {
+inline std::size_t memory_t::get_live() const noexcept {
   std::size_t _total = 0;
   const auto _count_k = shard_count_.load(std::memory_order_acquire);
   for (std::size_t _index = 0; _index < _count_k; ++_index) {
@@ -290,4 +291,4 @@ inline std::size_t arena_t::get_live() const noexcept {
   }
   return _total;
 }
-} // namespace frameworkcpp::arena
+} // namespace frameworkcpp::memory

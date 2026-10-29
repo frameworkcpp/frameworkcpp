@@ -18,7 +18,7 @@
 #include <thread>
 #include <vector>
 
-#include "frameworkcpp/arena/arena.hpp"
+#include "frameworkcpp/memory/memory.hpp"
 #include "frameworkcpp/reactor/detail/affinity.hpp"
 #include "frameworkcpp/reactor/detail/io_uring_ring.hpp"
 #include "frameworkcpp/reactor/detail/op.hpp"
@@ -66,7 +66,8 @@ inline reactor_t::~reactor_t() {
   stop_all();
 }
 
-inline bool reactor_t::bind_arena(arena::arena_t &arena, const reactor_config_t &config) noexcept {
+inline bool reactor_t::bind_memory(memory::memory_t &memory_owner,
+                                   const reactor_config_t &config) noexcept {
   if (bound_)
     return false;
   if (config.queues_ == 0 || config.queues_ > max_reactor_queues_k ||
@@ -101,17 +102,17 @@ inline bool reactor_t::bind_arena(arena::arena_t &arena, const reactor_config_t 
     concurrency_ = {};
   };
 
-  arena::object_spec_t _specs[reactor_spec_count_k] = {};
+  memory::object_spec_t _specs[reactor_spec_count_k] = {};
   make_specs(config, _specs);
 
   const std::size_t _total_ops_k = config.queues_ * config.max_jobs_per_queue_;
   const std::size_t _total_strands_k = config.queues_ * config.max_strands_;
   const std::size_t _total_timers_k = config.queues_ * config.max_timers_per_queue_;
 
-  arena::arena_shard_t _shard{};
+  memory::memory_shard_t _shard{};
   try {
-    _shard = arena.create_shard(
-        reactor_shard_tag_k, std::span<const arena::object_spec_t>(_specs, reactor_spec_count_k));
+    _shard = memory_owner.create_shard(
+        reactor_shard_tag_k, std::span<const memory::object_spec_t>(_specs, reactor_spec_count_k));
   } catch (...) {
     _reset_k();
     return false;

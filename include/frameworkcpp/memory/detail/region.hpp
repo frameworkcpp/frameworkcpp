@@ -8,7 +8,7 @@
 #include <cstdint>
 #include <new>
 
-namespace frameworkcpp::arena::detail {
+namespace frameworkcpp::memory::detail {
 class region_t {
   std::byte *base_ = nullptr;
   std::size_t bytes_ = 0;
@@ -79,4 +79,4 @@ class region_t {
     }
   }
 }; // class region_t
-} // namespace frameworkcpp::arena::detail
+} // namespace frameworkcpp::memory::detail

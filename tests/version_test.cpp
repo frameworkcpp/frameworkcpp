@@ -2,8 +2,8 @@
 
 #include <gtest/gtest.h>
 
-#include "frameworkcpp/arena/version.hpp"
 #include "frameworkcpp/environment/version.hpp"
+#include "frameworkcpp/memory/version.hpp"
 
 namespace frameworkcpp::environment {
 namespace {
@@ -24,11 +24,11 @@ TEST(VersionTest, String) {
   EXPECT_STREQ(get_version_string(), "1.0.0");
 }
 
-TEST(VersionTest, ArenaMatchesEnvironment) {
-  EXPECT_EQ(arena::get_version_major(), get_version_major());
-  EXPECT_EQ(arena::get_version_minor(), get_version_minor());
-  EXPECT_EQ(arena::get_version_patch(), get_version_patch());
-  EXPECT_STREQ(arena::get_version_string(), get_version_string());
+TEST(VersionTest, MemoryMatchesEnvironment) {
+  EXPECT_EQ(frameworkcpp::memory::get_version_major(), get_version_major());
+  EXPECT_EQ(frameworkcpp::memory::get_version_minor(), get_version_minor());
+  EXPECT_EQ(frameworkcpp::memory::get_version_patch(), get_version_patch());
+  EXPECT_STREQ(frameworkcpp::memory::get_version_string(), get_version_string());
 }
 
 } // namespace

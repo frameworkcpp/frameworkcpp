@@ -8,8 +8,8 @@
 
 #include <gtest/gtest.h>
 
-#include "frameworkcpp/arena/arena.hpp"
 #include "frameworkcpp/environment/environment.hpp"
+#include "frameworkcpp/memory/memory.hpp"
 
 namespace {
 
@@ -29,7 +29,7 @@ std::atomic<std::uint64_t> g_allocations{0};
 
 #if !defined(FRAMEWORKCPP_ENV_HEAP_SANITIZED)
 // Count every heap allocation in this TU: environment init and its read/write
-// paths must be fully arena-backed. Disabled under ASan/TSan, whose runtimes
+// paths must be fully memory-backed. Disabled under ASan/TSan, whose runtimes
 // own operator new/delete.
 void *operator new(std::size_t size) {
   ++g_allocations;
@@ -70,12 +70,12 @@ namespace frameworkcpp::environment::test {
 TEST(EnvironmentHeap, InitAndOpsAreHeapFree) {
   const auto _before_k = g_allocations.load(std::memory_order_relaxed);
 
-  arena::arena_config_t _arena_config;
-  _arena_config.size_ = 8 * 1024 * 1024;
-  arena::arena_t _arena{_arena_config};
+  memory::memory_config_t _memory_config;
+  _memory_config.size_ = 8 * 1024 * 1024;
+  memory::memory_t _memory{_memory_config};
 
   const environment_config_t _config_k;
-  init(_arena, _config_k);
+  init(_memory, _config_k);
 
   ASSERT_EQ(get_env("FC_HEAP_MISSING", "fallback"), "fallback");
   ASSERT_TRUE(set_env("FC_HEAP_KEY", "value-one"));
