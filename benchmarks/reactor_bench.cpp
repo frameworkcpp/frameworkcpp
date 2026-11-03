@@ -7,7 +7,9 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -19,12 +21,15 @@
 #include "frameworkcpp/memory/memory.hpp"
 #include "frameworkcpp/reactor/reactor.hpp"
 
+#include "detail/stats.hpp"
+#include "detail/workers.hpp"
+
 namespace {
 
 using frameworkcpp::memory::memory_config_t;
 using frameworkcpp::memory::memory_t;
 using frameworkcpp::memory::round_to_page;
-using frameworkcpp::reactor::monotonic_now_ns;
+
 using frameworkcpp::reactor::op_kind_t;
 using frameworkcpp::reactor::op_result_t;
 using frameworkcpp::reactor::queue_t;
@@ -169,104 +174,102 @@ bool wait_count(const std::atomic<std::size_t> &counter, std::size_t target) {
 
 // Coste de submit puro: se postean N jobs vacios y se para el cronometro antes
 // de esperar a que el hilo de la queue los consuma. `items_per_second` es el
-// caudal de encolado.
+// caudal de encolado. La distribucion del op en si queda en los counters.
 void bench_post_empty(benchmark::State &state) {
   const auto _batch_k = static_cast<std::size_t>(state.range(0));
   drain_context_t _context;
+  frameworkcpp::bench::histogram_t _histogram;
   run_reactor_benchmark<dispatch_fixture_t>(
-      state, [&_context, &state, _batch_k](dispatch_fixture_t &fixture) {
+      state, [&_context, &state, _batch_k, &_histogram](dispatch_fixture_t &fixture) {
         _context.done_.store(0, std::memory_order_relaxed);
         for (std::size_t _index = 0; _index < _batch_k; ++_index) {
-          if (!fixture.queue_->post(op_kind_t::custom_, -1, nullptr, 0, on_drain, &_context))
+          const std::uint64_t _t0_k = frameworkcpp::bench::cycle_count();
+          const bool _ok_k =
+              fixture.queue_->post(op_kind_t::custom_, -1, nullptr, 0, on_drain, &_context);
+          const std::uint64_t _t1_k = frameworkcpp::bench::cycle_count();
+          if (!_ok_k)
             return false;
+          _histogram.record(_t1_k - _t0_k);
         }
         state.PauseTiming();
-        const bool _ok_k = wait_count(_context.done_, _batch_k);
+        const bool _drained_k = wait_count(_context.done_, _batch_k);
         state.ResumeTiming();
-        return _ok_k;
+        return _drained_k;
       });
-  state.SetItemsProcessed(state.iterations() * static_cast<std::int64_t>(_batch_k));
+  const auto _items_k =
+      static_cast<std::uint64_t>(state.iterations()) * static_cast<std::uint64_t>(_batch_k);
+  frameworkcpp::bench::report_histogram(state, _histogram, _items_k);
 }
 
-// Coste total del motor para N jobs vacios: submit + despacho. `Time` es el
-// tiempo de pared del lote; el coste por job es Time / N.
+// Coste total del motor para N jobs vacios: submit + despacho. La muestra del
+// histograma es el lote completo; mide el tiempo hasta que el hilo de la cola
+// entrega el ultimo callback.
 void bench_process_empty(benchmark::State &state) {
   const auto _batch_k = static_cast<std::size_t>(state.range(0));
   drain_context_t _context;
+  frameworkcpp::bench::histogram_t _histogram;
   run_reactor_benchmark<dispatch_fixture_t>(
-      state, [&_context, _batch_k](dispatch_fixture_t &fixture) {
+      state, [&_context, _batch_k, &_histogram](dispatch_fixture_t &fixture) {
         _context.done_.store(0, std::memory_order_relaxed);
+        const std::uint64_t _t0_k = frameworkcpp::bench::cycle_count();
         for (std::size_t _index = 0; _index < _batch_k; ++_index) {
           if (!fixture.queue_->post(op_kind_t::custom_, -1, nullptr, 0, on_drain, &_context))
             return false;
         }
-        return wait_count(_context.done_, _batch_k);
+        if (!wait_count(_context.done_, _batch_k))
+          return false;
+        const std::uint64_t _t1_k = frameworkcpp::bench::cycle_count();
+        _histogram.record(_t1_k - _t0_k);
+        return true;
       });
-  state.SetItemsProcessed(state.iterations() * static_cast<std::int64_t>(_batch_k));
+  const auto _items_k =
+      static_cast<std::uint64_t>(state.iterations()) * static_cast<std::uint64_t>(_batch_k);
+  frameworkcpp::bench::report_histogram(state, _histogram, _items_k);
 }
 
 struct burst_slot_t {
   std::atomic<std::size_t> *done_counter_ = nullptr;
-  std::uint64_t posted_ns_ = 0;
-  std::atomic<std::uint64_t> done_ns_{0};
+  frameworkcpp::bench::histogram_t *histogram_ = nullptr;
+  std::uint64_t posted_cycles_ = 0;
 }; // struct burst_slot_t
 
 void on_burst(void *ctx, const op_result_t &result) {
   auto *_slot = static_cast<burst_slot_t *>(ctx);
   (void) result;
-  _slot->done_ns_.store(monotonic_now_ns(), std::memory_order_release);
+  const std::uint64_t _now_k = frameworkcpp::bench::cycle_count();
+  if (_slot->histogram_ != nullptr)
+    _slot->histogram_->record(_now_k - _slot->posted_cycles_);
   _slot->done_counter_->fetch_add(1, std::memory_order_release);
 }
 
-// Latencia end-to-end de cada job de un burst de N. Cada callback guarda su
-// timestamp de finalizacion y el submit guarda el suyo, asi que la latencia de
-// la posicion i incluye exactamente la cola que tenia delante. `Time` es la
-// latencia del ultimo job (la peor); p50/p99/max resumen la distribucion y
-// `per_job_ns` es el coste medio del lote.
+// Latencia end-to-end de cada job del burst. El callback del reactor registra
+// la latencia desde el post hasta que corre el handler: incluye la cola que
+// tiene delante y el coste del dispatch, no el scheduler que espera el caller.
 void bench_burst_latency(benchmark::State &state) {
   const auto _burst_k = static_cast<std::size_t>(state.range(0));
   std::vector<burst_slot_t> _slots(_burst_k);
-  std::vector<std::uint64_t> _latencies;
-  _latencies.reserve(1 << 20);
+  frameworkcpp::bench::histogram_t _histogram;
 
-  run_reactor_benchmark<dispatch_fixture_t>(state, [&](dispatch_fixture_t &fixture) {
-    std::atomic<std::size_t> _done{0};
-    for (auto &_slot : _slots) {
-      _slot.done_counter_ = &_done;
-      _slot.done_ns_.store(0, std::memory_order_relaxed);
-    }
+  run_reactor_benchmark<dispatch_fixture_t>(
+      state, [&_slots, &state, _burst_k, &_histogram](dispatch_fixture_t &fixture) {
+        std::atomic<std::size_t> _done{0};
+        for (auto &_slot : _slots) {
+          _slot.done_counter_ = &_done;
+          _slot.histogram_ = &_histogram;
+        }
 
-    std::uint64_t _first_posted_ns_k = 0;
-    for (std::size_t _index = 0; _index < _burst_k; ++_index) {
-      _slots[_index].posted_ns_ = monotonic_now_ns();
-      if (_index == 0)
-        _first_posted_ns_k = _slots[_index].posted_ns_;
-      if (!fixture.queue_->post(op_kind_t::custom_, -1, nullptr, 0, on_burst, &_slots[_index]))
-        return false;
-    }
+        for (std::size_t _index = 0; _index < _burst_k; ++_index) {
+          _slots[_index].posted_cycles_ = frameworkcpp::bench::cycle_count();
+          if (!fixture.queue_->post(op_kind_t::custom_, -1, nullptr, 0, on_burst, &_slots[_index]))
+            return false;
+        }
 
-    if (!wait_count(_done, _burst_k))
-      return false;
+        return wait_count(_done, _burst_k);
+      });
 
-    std::uint64_t _last_done_ns_k = 0;
-    for (std::size_t _index = 0; _index < _burst_k; ++_index) {
-      const std::uint64_t _done_ns_k = _slots[_index].done_ns_.load(std::memory_order_acquire);
-      _latencies.push_back(_done_ns_k - _slots[_index].posted_ns_);
-      if (_index + 1 == _burst_k)
-        _last_done_ns_k = _done_ns_k;
-    }
-
-    const auto _total_ns_k = static_cast<double>(_last_done_ns_k - _first_posted_ns_k);
-    state.counters["per_job_ns"] = _total_ns_k / static_cast<double>(_burst_k);
-    return true;
-  });
-
-  if (_latencies.empty())
-    return;
-  std::ranges::sort(_latencies);
-  state.counters["p50_ns"] = static_cast<double>(_latencies[_latencies.size() / 2]);
-  state.counters["p99_ns"] = static_cast<double>(_latencies[(_latencies.size() * 99) / 100]);
-  state.counters["max_ns"] = static_cast<double>(_latencies.back());
+  const auto _items_k =
+      static_cast<std::uint64_t>(state.iterations()) * static_cast<std::uint64_t>(_burst_k);
+  frameworkcpp::bench::report_histogram(state, _histogram, _items_k);
 }
 
 // --- timer schedule / cancel
@@ -292,15 +295,22 @@ struct timer_fixture_t : base_fixture_t {
 
 void bench_timer_schedule_cancel(benchmark::State &state) {
   timer_context_t _context;
-  run_reactor_benchmark<timer_fixture_t>(state, [&_context](timer_fixture_t &fixture) {
+  frameworkcpp::bench::histogram_t _histogram;
+  run_reactor_benchmark<timer_fixture_t>(state, [&_context, &_histogram](timer_fixture_t &fixture) {
+    const std::uint64_t _t0_k = frameworkcpp::bench::cycle_count();
     const auto _id_k =
         fixture.reactor_.schedule_timer(fixture.queue_, timer_delay_ns_k, on_timer, &_context);
     if (_id_k == 0)
       return false;
-    if (!fixture.reactor_.cancel_timer(fixture.queue_, _id_k))
+    const bool _cancelled_k = fixture.reactor_.cancel_timer(fixture.queue_, _id_k);
+    const std::uint64_t _t1_k = frameworkcpp::bench::cycle_count();
+    if (!_cancelled_k)
       return false;
+    _histogram.record(_t1_k - _t0_k);
     return wait_timer_count(fixture.reactor_, fixture.queue_);
   });
+  frameworkcpp::bench::report_histogram(
+      state, _histogram, static_cast<std::uint64_t>(state.iterations()));
 }
 
 // --- socket send / recv ------------------------------------------------------
@@ -356,32 +366,49 @@ struct socketpair_fixture_t : base_fixture_t {
 void bench_socket_send(benchmark::State &state) {
   io_context_t _context;
   std::memset(_context.buffer_, 0x5a, sizeof(_context.buffer_));
-  run_reactor_benchmark<socketpair_fixture_t>(state, [&_context](socketpair_fixture_t &fixture) {
-    _context.done_.store(false, std::memory_order_relaxed);
-    if (!fixture.socket_.send(_context.buffer_, payload_k, on_io, &_context))
-      return false;
-    if (!wait_flag(_context.done_))
-      return false;
-    char _drain_k[payload_k];
-    // La lectura vacia el peer del socketpair; bloquear aqui es intencionado.
-    return ::read(fixture.peer_fd_,
-                  _drain_k,
-                  sizeof(_drain_k)) == // NOLINT(clang-analyzer-unix.BlockInCriticalSection)
-           static_cast<ssize_t>(payload_k);
-  });
+  frameworkcpp::bench::histogram_t _histogram;
+  run_reactor_benchmark<socketpair_fixture_t>(
+      state, [&_context, &_histogram](socketpair_fixture_t &fixture) {
+        _context.done_.store(false, std::memory_order_relaxed);
+        const std::uint64_t _t0_k = frameworkcpp::bench::cycle_count();
+        if (!fixture.socket_.send(_context.buffer_, payload_k, on_io, &_context))
+          return false;
+        if (!wait_flag(_context.done_))
+          return false;
+        const std::uint64_t _t1_k = frameworkcpp::bench::cycle_count();
+        _histogram.record(_t1_k - _t0_k);
+        char _drain_k[payload_k];
+        // La lectura vacia el peer del socketpair; bloquear aqui es intencionado.
+        return ::read(fixture.peer_fd_,
+                      _drain_k,
+                      sizeof(_drain_k)) == // NOLINT(clang-analyzer-unix.BlockInCriticalSection)
+               static_cast<ssize_t>(payload_k);
+      });
+  frameworkcpp::bench::report_histogram(
+      state, _histogram, static_cast<std::uint64_t>(state.iterations()));
 }
 
 void bench_socket_recv(benchmark::State &state) {
   io_context_t _context;
   std::memset(_context.buffer_, 0x5a, sizeof(_context.buffer_));
-  run_reactor_benchmark<socketpair_fixture_t>(state, [&_context](socketpair_fixture_t &fixture) {
-    _context.done_.store(false, std::memory_order_relaxed);
-    if (::write(fixture.peer_fd_, _context.buffer_, payload_k) != static_cast<ssize_t>(payload_k))
-      return false;
-    if (!fixture.socket_.recv(_context.buffer_, payload_k, on_io, &_context))
-      return false;
-    return wait_flag(_context.done_) && _context.bytes_.load() == payload_k;
-  });
+  frameworkcpp::bench::histogram_t _histogram;
+  run_reactor_benchmark<socketpair_fixture_t>(
+      state, [&_context, &_histogram](socketpair_fixture_t &fixture) {
+        _context.done_.store(false, std::memory_order_relaxed);
+        const std::uint64_t _t0_k = frameworkcpp::bench::cycle_count();
+        if (::write(fixture.peer_fd_, _context.buffer_, payload_k) !=
+            static_cast<ssize_t>(payload_k))
+          return false;
+        if (!fixture.socket_.recv(_context.buffer_, payload_k, on_io, &_context))
+          return false;
+        if (!wait_flag(_context.done_) || _context.bytes_.load() != payload_k)
+          return false;
+        const std::uint64_t _t1_k = frameworkcpp::bench::cycle_count();
+        _histogram.record(_t1_k - _t0_k);
+        return true;
+      });
+  frameworkcpp::bench::report_histogram(
+      state, _histogram, static_cast<std::uint64_t>(state.iterations()));
 }
 
 // --- echo round trip ---------------------------------------------------------
@@ -496,20 +523,28 @@ void bench_echo_round_trip(benchmark::State &state) {
   char _out_k[payload_k];
   char _in_k[payload_k];
   std::memset(_out_k, 0x5a, sizeof(_out_k));
+  frameworkcpp::bench::histogram_t _histogram;
 
-  run_reactor_benchmark<echo_fixture_t>(state, [&](echo_fixture_t &fixture) {
-    if (::write(fixture.client_fd_, _out_k, sizeof(_out_k)) != static_cast<ssize_t>(sizeof(_out_k)))
-      return false;
-    // La lectura bloquea hasta que el eco vuelve: bloquear aqui es intencionado.
-    const ssize_t _read_k =
-        // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection)
-        ::read(fixture.client_fd_, _in_k, sizeof(_in_k));
-    if (_read_k != static_cast<ssize_t>(sizeof(_in_k)))
-      return false;
-    return std::memcmp(_out_k, _in_k, sizeof(_out_k)) == 0;
-  });
+  run_reactor_benchmark<echo_fixture_t>(
+      state, [&_out_k, &_in_k, &_histogram](echo_fixture_t &fixture) {
+        const std::uint64_t _t0_k = frameworkcpp::bench::cycle_count();
+        if (::write(fixture.client_fd_, _out_k, sizeof(_out_k)) !=
+            static_cast<ssize_t>(sizeof(_out_k)))
+          return false;
+        // La lectura bloquea hasta que el eco vuelve: bloquear aqui es intencionado.
+        const ssize_t _read_k =
+            // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection)
+            ::read(fixture.client_fd_, _in_k, sizeof(_in_k));
+        if (_read_k != static_cast<ssize_t>(sizeof(_in_k)))
+          return false;
+        const std::uint64_t _t1_k = frameworkcpp::bench::cycle_count();
+        _histogram.record(_t1_k - _t0_k);
+        return std::memcmp(_out_k, _in_k, sizeof(_out_k)) == 0;
+      });
 
+  const auto _items_k = static_cast<std::uint64_t>(state.iterations());
   state.SetBytesProcessed(static_cast<std::int64_t>(state.iterations() * payload_k));
+  frameworkcpp::bench::report_histogram(state, _histogram, _items_k);
 }
 
 // --- accept ------------------------------------------------------------------
@@ -573,11 +608,13 @@ struct accept_fixture_t : base_fixture_t {
 }; // struct accept_fixture_t
 
 void bench_accept(benchmark::State &state) {
-  run_reactor_benchmark<accept_fixture_t>(state, [](accept_fixture_t &fixture) {
+  frameworkcpp::bench::histogram_t _histogram;
+  run_reactor_benchmark<accept_fixture_t>(state, [&_histogram](accept_fixture_t &fixture) {
     const int _target_k = fixture.context_.accepted_.load(std::memory_order_acquire) + 1;
     const int _client_k = ::socket(AF_INET, SOCK_STREAM, 0);
     if (_client_k < 0)
       return false;
+    const std::uint64_t _t0_k = frameworkcpp::bench::cycle_count();
     const int _connected_k = ::connect(
         _client_k, reinterpret_cast<const sockaddr *>(&fixture.bound_), sizeof(fixture.bound_));
     if (_connected_k != 0) {
@@ -592,9 +629,211 @@ void bench_accept(benchmark::State &state) {
     }
 
     ::close(_client_k);
-    return fixture.context_.accepted_.load(std::memory_order_acquire) >= _target_k &&
-           !fixture.context_.failed_.load(std::memory_order_acquire);
+    const std::uint64_t _t1_k = frameworkcpp::bench::cycle_count();
+    if (fixture.context_.accepted_.load(std::memory_order_acquire) < _target_k ||
+        fixture.context_.failed_.load(std::memory_order_acquire))
+      return false;
+    _histogram.record(_t1_k - _t0_k);
+    return true;
   });
+  frameworkcpp::bench::report_histogram(
+      state, _histogram, static_cast<std::uint64_t>(state.iterations()));
+}
+
+// --- multi-producer post ---------------------------------------------------
+//
+// N workers postean al mismo queue sin limitar su tasa; el hilo de la queue
+// drena un op vacío por op. Cada iteración del bench es una tanda de posts
+// en paralelo; los histogramas de los workers se suman al final.
+
+constexpr std::size_t mp_ops_per_worker_k = 256;
+
+void on_noop(void *ctx, const op_result_t &result) {
+  (void) ctx;
+  (void) result;
+}
+
+// Cuerpo común para los benches con productores concurrentes sobre un mismo
+// queue. Pasa la referencia al pool de métricas por referencia; la variante
+// del modelo se elige en cada bench concreto.
+template <std::size_t ThreadCount>
+void bench_post_shared(benchmark::State &state,
+                       queue_t *queue,
+                       std::atomic<std::uint64_t> &dropped) {
+  static frameworkcpp::bench::workers_t<ThreadCount> _pool_k;
+
+  while (state.KeepRunning()) {
+    dropped.store(0, std::memory_order_relaxed);
+    const auto _t0_k = std::chrono::steady_clock::now();
+    _pool_k.execute([queue, &dropped](std::size_t index, frameworkcpp::bench::histogram_t &hist) {
+      (void) index;
+      for (std::size_t _op = 0; _op < mp_ops_per_worker_k; ++_op) {
+        const std::uint64_t _op0_k = frameworkcpp::bench::cycle_count();
+        const bool _ok_k = queue->post(op_kind_t::custom_, -1, nullptr, 0, on_noop, nullptr);
+        const std::uint64_t _op1_k = frameworkcpp::bench::cycle_count();
+        if (!_ok_k) {
+          dropped.fetch_add(1, std::memory_order_relaxed);
+          continue;
+        }
+        hist.record(_op1_k - _op0_k);
+      }
+    });
+    const auto _t1_k = std::chrono::steady_clock::now();
+
+    const double _seconds_k = std::chrono::duration<double>(_t1_k - _t0_k).count();
+    const std::uint64_t _items_k =
+        static_cast<std::uint64_t>(ThreadCount) * static_cast<std::uint64_t>(mp_ops_per_worker_k);
+    const frameworkcpp::bench::histogram_t _hist_k = _pool_k.merged();
+    _pool_k.reset();
+
+    state.counters["aggregate_items_per_second"] = static_cast<double>(_items_k) / _seconds_k;
+    state.counters["dropped_posts"] = static_cast<double>(dropped.load());
+    frameworkcpp::bench::report_histogram(state, _hist_k, _items_k);
+  }
+}
+
+struct post_mp_holder_t {
+  post_mp_holder_t(const post_mp_holder_t &) = delete;
+  post_mp_holder_t &operator=(const post_mp_holder_t &) = delete;
+  post_mp_holder_t(post_mp_holder_t &&) = delete;
+  post_mp_holder_t &operator=(post_mp_holder_t &&) = delete;
+  memory_t memory_;
+  reactor_t reactor_;
+  queue_t *queue_ = nullptr;
+  std::atomic<std::uint64_t> dropped_{0};
+
+  post_mp_holder_t() : memory_{make_memory_config()} {
+    if (!reactor_.bind_memory(memory_, make_reactor_config()))
+      std::abort();
+    queue_ = reactor_.get_or_create("bench-mp-lock-free"); // hereda lock_free_ de la config
+    if (queue_ == nullptr)
+      std::abort();
+    reactor_.run_all();
+  }
+  ~post_mp_holder_t() { reactor_.stop_all(); }
+}; // struct post_mp_holder_t
+
+post_mp_holder_t &post_mp_holder() {
+  static post_mp_holder_t _holder_k;
+  return _holder_k;
+}
+
+struct post_mp_ts_holder_t {
+  post_mp_ts_holder_t(const post_mp_ts_holder_t &) = delete;
+  post_mp_ts_holder_t &operator=(const post_mp_ts_holder_t &) = delete;
+  post_mp_ts_holder_t(post_mp_ts_holder_t &&) = delete;
+  post_mp_ts_holder_t &operator=(post_mp_ts_holder_t &&) = delete;
+  memory_t memory_;
+  reactor_t reactor_;
+  queue_t *queue_ = nullptr;
+  std::atomic<std::uint64_t> dropped_{0};
+
+  post_mp_ts_holder_t() : memory_{make_memory_config()} {
+    reactor_config_t _config_k = make_reactor_config();
+    _config_k.concurrency_.producers_ = frameworkcpp::concurrency_model_t::thread_safe_;
+    if (!reactor_.bind_memory(memory_, _config_k))
+      std::abort();
+    queue_ = reactor_.get_or_create("bench-mp-thread-safe");
+    if (queue_ == nullptr)
+      std::abort();
+    reactor_.run_all();
+  }
+  ~post_mp_ts_holder_t() { reactor_.stop_all(); }
+}; // struct post_mp_ts_holder_t
+
+post_mp_ts_holder_t &post_mp_ts_holder() {
+  static post_mp_ts_holder_t _holder_k;
+  return _holder_k;
+}
+
+// --- thread propia por productor (single_thread_) --------------------------
+//
+// Cada productor tiene su propio queue con su hilo consumidor, el techo de
+// escalado cuando nadie comparte nada. Config.queues_ = N queues; el modelo
+// de productores por defecto es lock_free_, pero el bench usa
+// producers_=single_thread_ porque cada queue lo consume un único hilo.
+
+constexpr std::size_t private_queues_k = 4;
+
+reactor_config_t make_private_reactor_config() {
+  auto _config = make_reactor_config();
+  _config.queues_ = private_queues_k;
+  _config.concurrency_.producers_ = frameworkcpp::concurrency_model_t::single_thread_;
+  return _config;
+}
+
+memory_config_t make_private_memory_config() {
+  memory_config_t _config;
+  _config.size_ = round_to_page(reactor_t::precompute(make_private_reactor_config()));
+  return _config;
+}
+
+struct post_private_holder_t {
+  post_private_holder_t(const post_private_holder_t &) = delete;
+  post_private_holder_t &operator=(const post_private_holder_t &) = delete;
+  post_private_holder_t(post_private_holder_t &&) = delete;
+  post_private_holder_t &operator=(post_private_holder_t &&) = delete;
+  memory_t memory_;
+  reactor_t reactor_;
+  queue_t *queues_[private_queues_k] = {};
+
+  post_private_holder_t() : memory_{make_private_memory_config()} {
+    const reactor_config_t _config_k = make_private_reactor_config();
+    if (!reactor_.bind_memory(memory_, _config_k))
+      std::abort();
+    for (std::size_t _i = 0; _i < private_queues_k; ++_i) {
+      const std::string _name_k = "bench-private-" + std::to_string(_i);
+      queues_[_i] = reactor_.get_or_create(_name_k);
+      if (queues_[_i] == nullptr)
+        std::abort();
+    }
+    reactor_.run_all();
+  }
+  ~post_private_holder_t() { reactor_.stop_all(); }
+}; // struct post_private_holder_t
+
+post_private_holder_t &post_private_holder() {
+  static post_private_holder_t _holder_k;
+  return _holder_k;
+}
+
+template <std::size_t ThreadCount> void bench_post_multiproducers(benchmark::State &state) {
+  auto &_holder_k = post_mp_holder();
+  bench_post_shared<ThreadCount>(state, _holder_k.queue_, _holder_k.dropped_);
+}
+
+template <std::size_t ThreadCount> void bench_post_mp_thread_safe(benchmark::State &state) {
+  auto &_holder_k = post_mp_ts_holder();
+  bench_post_shared<ThreadCount>(state, _holder_k.queue_, _holder_k.dropped_);
+}
+
+template <std::size_t ThreadCount> void bench_post_private(benchmark::State &state) {
+  auto &_holder_k = post_private_holder();
+  static frameworkcpp::bench::workers_t<ThreadCount> _pool_k;
+
+  while (state.KeepRunning()) {
+    const auto _t0_k = std::chrono::steady_clock::now();
+    _pool_k.execute([&_holder_k](std::size_t index, frameworkcpp::bench::histogram_t &hist) {
+      queue_t *_queue = _holder_k.queues_[index];
+      for (std::size_t _op = 0; _op < mp_ops_per_worker_k; ++_op) {
+        const std::uint64_t _op0_k = frameworkcpp::bench::cycle_count();
+        const bool _ok_k = _queue->post(op_kind_t::custom_, -1, nullptr, 0, on_noop, nullptr);
+        const std::uint64_t _op1_k = frameworkcpp::bench::cycle_count();
+        if (_ok_k)
+          hist.record(_op1_k - _op0_k);
+      }
+    });
+    const auto _t1_k = std::chrono::steady_clock::now();
+
+    const double _seconds_k = std::chrono::duration<double>(_t1_k - _t0_k).count();
+    const std::uint64_t _items_k =
+        static_cast<std::uint64_t>(ThreadCount) * static_cast<std::uint64_t>(mp_ops_per_worker_k);
+    const frameworkcpp::bench::histogram_t _hist_k = _pool_k.merged();
+    _pool_k.reset();
+
+    state.counters["aggregate_items_per_second"] = static_cast<double>(_items_k) / _seconds_k;
+    frameworkcpp::bench::report_histogram(state, _hist_k, _items_k);
+  }
 }
 
 } // namespace
@@ -619,5 +858,14 @@ BENCHMARK(bench_socket_send)->Name("reactor/socket_send");
 BENCHMARK(bench_socket_recv)->Name("reactor/socket_recv");
 BENCHMARK(bench_echo_round_trip)->Name("reactor/echo_round_trip");
 BENCHMARK(bench_accept)->Name("reactor/accept");
+BENCHMARK_TEMPLATE(bench_post_multiproducers, 1)->Name("reactor/post_mp/1");
+BENCHMARK_TEMPLATE(bench_post_multiproducers, 2)->Name("reactor/post_mp/2");
+BENCHMARK_TEMPLATE(bench_post_multiproducers, 4)->Name("reactor/post_mp/4");
+BENCHMARK_TEMPLATE(bench_post_mp_thread_safe, 1)->Name("reactor/post_mp_thread_safe/1");
+BENCHMARK_TEMPLATE(bench_post_mp_thread_safe, 2)->Name("reactor/post_mp_thread_safe/2");
+BENCHMARK_TEMPLATE(bench_post_mp_thread_safe, 4)->Name("reactor/post_mp_thread_safe/4");
+BENCHMARK_TEMPLATE(bench_post_private, 1)->Name("reactor/post_private_mt/1");
+BENCHMARK_TEMPLATE(bench_post_private, 2)->Name("reactor/post_private_mt/2");
+BENCHMARK_TEMPLATE(bench_post_private, 4)->Name("reactor/post_private_mt/4");
 
 BENCHMARK_MAIN();
