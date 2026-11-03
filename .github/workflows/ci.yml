@@ -42,6 +42,18 @@ jobs:
             --header-filter='include/frameworkcpp/.*' \
             tests/*.cpp
 
+      - name: Configure the benchmarks
+        run: cmake --preset bench
+
+      - name: clang-tidy on the benchmarks
+        run: |
+          clang-tidy \
+            -p build/bench \
+            --config-file=.clang-tidy \
+            '-warnings-as-errors=*' \
+            --header-filter='include/frameworkcpp/.*' \
+            benchmarks/*.cpp
+
   # Verifica las garantias de tiempo real en las arquitecturas que el CI emula.
   # El emulador de QEMU solo puede compilar: este job usa los cross
   # toolchains y evalua los static_assert que dependen de la arquitectura (por
@@ -60,6 +72,52 @@ jobs:
 
       - name: Check the real-time invariants on every architecture
         run: ./tools/cross-check.sh
+
+  # Benchmarks nativos en las arquitecturas soportadas. Solo compila y ejecuta
+  # los targets de benchmark: no hay umbrales, el objetivo es detectar
+  # regresiones comparando los JSON entre ejecuciones.
+  benchmarks:
+    if: github.ref_type != 'tag'
+    name: benchmarks-${{ matrix.arch }}
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq cmake g++ liburing-dev
+
+      - name: Configure
+        run: cmake --preset bench
+
+      - name: Build benchmarks
+        run: cmake --build --preset bench -j 2
+
+      - name: Run benchmarks
+        run: |
+          ./build/bench/benchmarks/frameworkcpp_memory_bench \
+            --benchmark_out="memory-${{ matrix.arch }}.json" \
+            --benchmark_out_format=json
+          ./build/bench/benchmarks/frameworkcpp_environment_bench \
+            --benchmark_out="environment-${{ matrix.arch }}.json" \
+            --benchmark_out_format=json
+          ./build/bench/benchmarks/frameworkcpp_reactor_bench \
+            --benchmark_out="reactor-${{ matrix.arch }}.json" \
+            --benchmark_out_format=json
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmarks-${{ matrix.arch }}
+          path: '*-${{ matrix.arch }}.json'
+          if-no-files-found: error
 
   # One job per (architecture, build type). Every job runs inside an Ubuntu
   # container of the target architecture, emulated via QEMU (binfmt) for the
