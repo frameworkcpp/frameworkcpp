@@ -9,6 +9,7 @@
 
 #include <arpa/inet.h>
 #include <cerrno>
+#include <dirent.h>
 #include <fcntl.h>
 #include <gtest/gtest.h>
 #include <netinet/in.h>
@@ -40,6 +41,31 @@ constexpr reactor_config_t make_reactor_config() {
   _config.max_strands_ = 32;
   _config.affinity_ = false;
   return _config;
+}
+
+struct wake_context_t {
+  std::atomic<bool> done_{false};
+}; // struct wake_context_t
+
+// Descriptores abiertos del proceso. Devuelve -1 si el sistema no expone
+// /proc, y en ese caso el test que lo usa se omite.
+int count_open_fds() {
+  DIR *_dir_k = ::opendir("/proc/self/fd");
+  if (_dir_k == nullptr)
+    return -1;
+  int _count_k = 0;
+  while (const struct dirent *_entry_k = ::readdir(_dir_k)) {
+    if (_entry_k->d_name[0] >= '0' && _entry_k->d_name[0] <= '9')
+      ++_count_k;
+  }
+  ::closedir(_dir_k);
+  return _count_k - 1; // el directorio que se esta leyendo
+}
+
+void on_wake(void *ctx, const op_result_t &result) {
+  auto *_context = static_cast<wake_context_t *>(ctx);
+  (void) result;
+  _context->done_.store(true, std::memory_order_release);
 }
 
 struct recv_context_t {
@@ -795,6 +821,203 @@ TEST(reactor_test_t, EpollBackendServesIoWithoutIoUring) {
 
   ::close(_fds[0]);
   ::close(_fds[1]);
+}
+
+TEST(reactor_test_t, APostedJobWakesTheSleepingQueue) {
+  // El hilo de la queue duerme en el backend de eventos. Un job posteado
+  // desde otro hilo debe despertarlo via eventfd, no esperar al timeout.
+  for (const auto _backend_k : {backend_t::io_uring_, backend_t::epoll_}) {
+    if (_backend_k == backend_t::io_uring_ && !io_uring_available())
+      continue;
+
+    reactor_config_t _config = make_reactor_config();
+    _config.backend_ = _backend_k;
+
+    auto _memory_config = make_memory_config(memory::round_to_page(precompute(_config)));
+    memory::memory_t _memory{_memory_config};
+    reactor_t _reactor;
+    ASSERT_TRUE(_reactor.bind_memory(_memory, _config));
+
+    auto *_queue = _reactor.get_or_create("wake");
+    ASSERT_NE(_queue, nullptr);
+    _reactor.run_all();
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
+    wake_context_t _context;
+    ASSERT_TRUE(_queue->post(op_kind_t::custom_, -1, nullptr, 0, on_wake, &_context));
+
+    const auto _deadline_k = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!_context.done_.load(std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() < _deadline_k) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    _reactor.stop_all();
+
+    EXPECT_TRUE(_context.done_.load(std::memory_order_acquire));
+  }
+}
+
+TEST(reactor_test_t, APostedJobWakesTheSleepingQueueBeforeThePollTimeout) {
+  // Un timer lejano deja el timeout de la espera en un segundo, asi que la
+  // unica forma de que el job corra antes es el eventfd. Si el despertar
+  // dependiera del timeout, el job tardaria un segundo; aqui se exige que
+  // corra en menos de 100 ms, un margen que no depende de la carga.
+  reactor_config_t _config = make_reactor_config();
+  _config.backend_ = backend_t::epoll_;
+
+  auto _memory_config = make_memory_config(memory::round_to_page(precompute(_config)));
+  memory::memory_t _memory{_memory_config};
+  reactor_t _reactor;
+  ASSERT_TRUE(_reactor.bind_memory(_memory, _config));
+
+  auto *_queue = _reactor.get_or_create("wake-timeout");
+  ASSERT_NE(_queue, nullptr);
+  _reactor.run_all();
+
+  wake_context_t _timer_context;
+  const std::uint64_t _timer_id_k = _reactor.schedule_timer(
+      _queue, 10ULL * 1000ULL * 1000ULL * 1000ULL, on_wake, &_timer_context);
+  ASSERT_NE(_timer_id_k, 0);
+
+  // El marker se ejecuta despues del timer en la cola FIFO: cuando corre, el
+  // timer ya esta en el heap y la espera usa su deadline.
+  wake_context_t _marker_context;
+  ASSERT_TRUE(_queue->post(op_kind_t::custom_, -1, nullptr, 0, on_wake, &_marker_context));
+  const auto _marker_deadline_k = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (!_marker_context.done_.load(std::memory_order_acquire) &&
+         std::chrono::steady_clock::now() < _marker_deadline_k) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  ASSERT_TRUE(_marker_context.done_.load(std::memory_order_acquire));
+
+  // Deja que la queue se duerma en la espera.
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
+  wake_context_t _context;
+  const auto _posted_k = std::chrono::steady_clock::now();
+  ASSERT_TRUE(_queue->post(op_kind_t::custom_, -1, nullptr, 0, on_wake, &_context));
+
+  const auto _deadline_k = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (!_context.done_.load(std::memory_order_acquire) &&
+         std::chrono::steady_clock::now() < _deadline_k) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  const auto _elapsed_k = std::chrono::steady_clock::now() - _posted_k;
+  _reactor.stop_all();
+
+  EXPECT_TRUE(_context.done_.load(std::memory_order_acquire));
+  EXPECT_LT(_elapsed_k, std::chrono::milliseconds(100));
+}
+
+TEST(reactor_test_t, APostedJobWakesTheSleepingQueueAgainAfterItWokeUp) {
+  // Cada job deja la queue dormida de nuevo, asi que el backend tiene que
+  // rear-mar su lectura sobre el eventfd. Si no lo hace, el segundo job se
+  // queda esperando al timeout.
+  for (const auto _backend_k : {backend_t::io_uring_, backend_t::epoll_}) {
+    if (_backend_k == backend_t::io_uring_ && !io_uring_available())
+      continue;
+
+    reactor_config_t _config = make_reactor_config();
+    _config.backend_ = _backend_k;
+
+    auto _memory_config = make_memory_config(memory::round_to_page(precompute(_config)));
+    memory::memory_t _memory{_memory_config};
+    reactor_t _reactor;
+    ASSERT_TRUE(_reactor.bind_memory(_memory, _config));
+
+    auto *_queue = _reactor.get_or_create("wake-again");
+    ASSERT_NE(_queue, nullptr);
+    _reactor.run_all();
+
+    constexpr std::size_t _jobs_k = 3;
+    for (std::size_t _index = 0; _index < _jobs_k; ++_index) {
+      // La queue duerme de nuevo antes del siguiente job.
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
+      wake_context_t _context;
+      ASSERT_TRUE(_queue->post(op_kind_t::custom_, -1, nullptr, 0, on_wake, &_context));
+
+      const auto _deadline_k = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+      while (!_context.done_.load(std::memory_order_acquire) &&
+             std::chrono::steady_clock::now() < _deadline_k) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      }
+      EXPECT_TRUE(_context.done_.load(std::memory_order_acquire));
+    }
+    _reactor.stop_all();
+  }
+}
+
+TEST(reactor_test_t, DestroyingAReactorReleasesItsDescriptors) {
+  // El ring de io_uring, el de epoll y el eventfd son descriptores del
+  // proceso. Si el reactor no los suelta al destruirse, cada uno se lleva su
+  // descriptor por delante.
+  const int _before_k = count_open_fds();
+  if (_before_k < 0)
+    GTEST_SKIP() << "el sistema no expone /proc/self/fd";
+
+  for (int _index = 0; _index < 3; ++_index) {
+    const reactor_config_t _config_k = make_reactor_config();
+
+    auto _memory_config = make_memory_config(memory::round_to_page(precompute(_config_k)));
+    memory::memory_t _memory{_memory_config};
+    reactor_t _reactor;
+    ASSERT_TRUE(_reactor.bind_memory(_memory, _config_k));
+  }
+
+  EXPECT_LE(count_open_fds(), _before_k);
+}
+
+TEST(reactor_test_t, TheMemoryCanHostAnotherReactorAfterTheFirstIsDestroyed) {
+  // El reactor devuelve sus bloques al memory store al destruirse, asi que la
+  // memory no queda reservada para el.
+  const reactor_config_t _config_k = make_reactor_config();
+  auto _memory_config = make_memory_config(memory::round_to_page(precompute(_config_k)));
+  memory::memory_t _memory{_memory_config};
+  std::size_t _used_k = 0;
+
+  {
+    reactor_t _reactor;
+    ASSERT_TRUE(_reactor.bind_memory(_memory, _config_k));
+    EXPECT_GT(_memory.get_live(), 0U);
+    _used_k = _memory.get_used();
+  }
+
+  EXPECT_EQ(_memory.get_live(), 0U);
+  EXPECT_EQ(_memory.get_used(), _used_k);
+
+  reactor_t _second;
+  EXPECT_TRUE(_second.bind_memory(_memory, _config_k));
+}
+
+TEST(reactor_test_t, RebindingAfterStoppingReusesTheSameMemory) {
+  const reactor_config_t _config_k = make_reactor_config();
+  auto _memory_config = make_memory_config(memory::round_to_page(precompute(_config_k)));
+  memory::memory_t _memory{_memory_config};
+  reactor_t _reactor;
+
+  ASSERT_TRUE(_reactor.bind_memory(_memory, _config_k));
+  _reactor.stop_all();
+
+  // El bind anterior devolvio sus bloques, asi que el segundo bind puede
+  // carvearlos otra vez en la misma memory.
+  ASSERT_TRUE(_reactor.bind_memory(_memory, _config_k));
+  EXPECT_TRUE(_reactor.initialized());
+  EXPECT_NE(_reactor.get_or_create("after-rebind"), nullptr);
+}
+
+TEST(reactor_test_t, ReleasingTheMemoryGivesTheBlocksBack) {
+  const reactor_config_t _config_k = make_reactor_config();
+  auto _memory_config = make_memory_config(memory::round_to_page(precompute(_config_k)));
+  memory::memory_t _memory{_memory_config};
+  reactor_t _reactor;
+
+  ASSERT_TRUE(_reactor.bind_memory(_memory, _config_k));
+  EXPECT_GT(_memory.get_live(), 0U);
+
+  _reactor.release_memory();
+  EXPECT_EQ(_memory.get_live(), 0U);
+  EXPECT_FALSE(_reactor.initialized());
 }
 
 TEST(reactor_test_t, ForcedIoUringBackendFailsWhenTheKernelHasNone) {

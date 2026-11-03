@@ -22,7 +22,7 @@ kernel maps the submission and completion queues into the process, so:
 - posting an operation is a write into a shared array — no syscall;
 - waiting for a completion is a read from the kernel's array — no syscall
   either, unless the kernel has nothing pending, in which case the thread
-  sleeps with a timeout so it can notice a stop request.
+  sleeps until something wakes it.
 
 That is the whole point of `io_uring` over `epoll`: the kernel batches the
 syscalls, and a batch of one hundred operations costs one syscall instead of a
@@ -77,6 +77,43 @@ The producer publishes by writing the pointer into the slot and then bumping
 and bumps `head_`. There is no lock, no condition variable and no allocation.
 The cost is a single atomic store per post.
 
+## Waking a queue that has nothing to do
+
+A queue with no pending work has nothing to wait for. The obvious answer is to
+poll: wake up every millisecond, look at the queue, go back to sleep. It works,
+but it puts a millisecond between a post and the handler that serves it. On a
+system with a hundred-microsecond deadline, that is a missed deadline waiting
+to happen.
+
+Each queue owns an `eventfd` for exactly this. The queue's thread parks on it —
+as a pending `io_uring` read, or as an `epoll` registration on the portable
+backend — and a producer wakes it by writing to it:
+
+```mermaid
+flowchart LR
+    producer["posting thread"] -->|"push the operation"| ring["operation ring"]
+    producer -->|"write to the eventfd"| fd["eventfd"]
+    fd -->|"wakes the parked thread"| loop["queue thread"]
+    loop -->|"pop the operation"| handler["handler"]
+```
+
+The write is the part worth optimising. If every post wrote to the eventfd, a
+burst of a thousand posts would pay a thousand syscalls. Instead the queue
+publishes a `sleeping` flag and the producer checks it first: only the post that
+finds the queue asleep writes to the eventfd, and that write clears the flag. A
+burst pays one syscall in total, and the posts that arrive while the queue is
+already awake pay nothing.
+
+There is a window between "the producer pushed the operation" and "the queue
+decided to sleep" where a wake-up could be lost. The queue closes it by
+re-checking its own operation ring after publishing the flag and before
+blocking: if an operation arrived in the meantime, the thread goes back to work
+instead of sleeping on it.
+
+The trade-off is a descriptor per queue and one `eventfd` write per wake-up.
+The timeout that the loop keeps as a safety net is still there, so a lost wake
+costs latency, not correctness.
+
 ## Who touches what
 
 The reactor has three kinds of state and each one has a single owner:
@@ -86,6 +123,7 @@ The reactor has three kinds of state and each one has a single owner:
 | Operation pool | anyone | a compare-exchange takes a free operation, so two threads posting at once never take the same one |
 | Timer heap | the queue's thread | a timer is scheduled by queueing an operation; the thread puts it in the heap |
 | Socket slots | the queue's thread | the descriptor, the pending operation, the close flag and the closed flag are atomics |
+| Wake descriptor | the queue's thread | the descriptor is atomic; a producer writes to it only when it finds the queue asleep |
 
 That is why the timer heap needs no lock and the operation pool needs no
 mutex: the heap is touched by one thread, and the pool hands out operations
@@ -160,6 +198,11 @@ flowchart TD
 how many bytes it would take, so the number you budget at compile time is the
 number the reactor carves at runtime. The reactor test asserts exactly that.
 
+The blocks belong to the reactor while it lives: when it is destroyed, or when
+you call `release_memory`, they go back to the memory store. A memory can
+therefore host one reactor at a time and then host another, as long as the
+configuration is the same — the shard keeps the layout of its first bind.
+
 ## Moving a connection between threads
 
 A socket is not owned by a thread: it is registered in a queue, and the queue's
@@ -209,7 +252,8 @@ costs no allocation. Each op remembers its position in the heap, which makes
 cancelling a timer by id a removal rather than a scan.
 
 The queue's loop reads the nearest deadline before it waits, and sleeps exactly
-until then (capped at a millisecond so a stop request is noticed promptly).
+until then. A stop request wakes the queue through the same `eventfd` that
+carries posted operations, so the deadline is a timer and not a poll.
 
 A timer with a strand does not run when it expires: it joins the strand's
 queue, so it cannot overlap the operation the strand is busy with.

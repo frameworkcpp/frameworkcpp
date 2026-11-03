@@ -68,6 +68,14 @@ struct queue_control_t {
 #endif
   std::atomic<bool> stop_{false};
   std::atomic<bool> running_{false};
+  // Despertar del hilo de la queue. El productor solo escribe el eventfd en
+  // la transicion dormido -> ocupado, asi que una rafaga no paga syscalls.
+  // El descriptor es atomico porque stop_all lo cierra mientras un productor
+  // puede estar despertando la queue.
+  std::atomic<int> wake_fd_{-1};
+  std::uint64_t wake_value_ = 0;
+  bool wake_armed_ = false; // solo lo toca el hilo de la queue
+  std::atomic<bool> sleeping_{false};
   queue_concurrency_t concurrency_ = {};
 }; // struct queue_control_t
 
@@ -109,6 +117,14 @@ struct reactor_state_t {
   socket_slot_t *sockets_ = nullptr;
   strand_t *strands_ = nullptr;
   struct epoll_event *events_ = nullptr;
+  // Los bloques carveados del memory store, en el orden en que se piden. Se
+  // devuelven al store cuando el reactor suelta su estado, para que otra
+  // instancia pueda carvearlos con la misma configuracion.
+  std::byte *blocks_[reactor_spec_count_k] = {};
+  // Cuantos objetos se han construido sobre esos bloques. Un bind que falla a
+  // medias solo destruye los que existen.
+  std::size_t built_queues_ = 0;
+  std::size_t built_strands_ = 0;
   std::size_t num_queues_ = 0;
   std::size_t num_sockets_ = 0;
   std::size_t num_strands_ = 0;

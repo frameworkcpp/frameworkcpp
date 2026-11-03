@@ -14,8 +14,10 @@
 #include <functional>
 #include <netinet/in.h>
 #include <new>
+#include <sys/eventfd.h>
 #include <sys/un.h>
 #include <thread>
+#include <unistd.h>
 #include <vector>
 
 #include "frameworkcpp/memory/memory.hpp"
@@ -53,6 +55,69 @@ inline socket_slot_t *find_slot(reactor_state_t *state, std::uint64_t socket_id)
   return &state->sockets_[socket_id - 1];
 }
 
+// Centinela de user_data para el read que duerme sobre el eventfd de wake.
+inline constexpr std::uint64_t wake_user_data_k = ~static_cast<std::uint64_t>(0);
+
+// Despierta al hilo de la queue si esta dormido. En rafaga solo cuesta una
+// carga atomica: el exchange y el write ocurren solo en la transicion
+// dormido -> ocupado.
+inline void wake_queue(queue_control_t *qc) noexcept {
+  if (qc == nullptr)
+    return;
+  const int _wake_fd_k = qc->wake_fd_.load(std::memory_order_acquire);
+  if (_wake_fd_k < 0)
+    return;
+  if (qc->sleeping_.load(std::memory_order_seq_cst) &&
+      qc->sleeping_.exchange(false, std::memory_order_seq_cst)) {
+    const std::uint64_t _one_k = 1;
+    const ssize_t _written_k = ::write(_wake_fd_k, &_one_k, sizeof(_one_k));
+    (void) _written_k;
+  }
+}
+
+// Arma (si hace falta) el read que el kernel deja pendiente sobre el eventfd.
+// Cuando llega el write, el CQE despierta al hilo sin syscall ni spin.
+inline void arm_wake_read(queue_control_t *qc) noexcept {
+  if (qc == nullptr || !qc->ring_.is_ready() || qc->wake_armed_)
+    return;
+  const int _wake_fd_k = qc->wake_fd_.load(std::memory_order_acquire);
+  if (_wake_fd_k < 0)
+    return;
+  auto *_sqe = qc->ring_.acquire_sqe();
+  if (_sqe == nullptr)
+    return;
+  io_uring_prep_read(_sqe, _wake_fd_k, &qc->wake_value_, sizeof(qc->wake_value_), 0);
+  _sqe->user_data = wake_user_data_k;
+  qc->wake_armed_ = qc->ring_.submit(1);
+}
+
+// Suelta los recursos de las queues ya construidas: el ring de io_uring y el
+// de epoll son descriptores del proceso. Las queues viven en el memory del
+// usuario, asi que sin destruirlas aqui cada bind se lleva sus descriptores
+// por delante.
+inline void release_queues(reactor_state_t *state, std::size_t count) noexcept {
+  if (state->queues_ == nullptr)
+    return;
+  for (std::size_t _index = 0; _index < count; ++_index) {
+    const int _wake_fd_k = state->queues_[_index].wake_fd_.exchange(-1, std::memory_order_acq_rel);
+    state->queues_[_index].~queue_control_t();
+    if (_wake_fd_k >= 0)
+      ::close(_wake_fd_k);
+  }
+}
+
+// Indica si alguna queue esta siendo servida por su hilo. Una queue en
+// marcha esta usando su estado, asi que no se puede soltar todavia.
+inline bool queues_running(reactor_state_t *state, std::size_t count) noexcept {
+  if (state->queues_ == nullptr)
+    return false;
+  for (std::size_t _index = 0; _index < count; ++_index) {
+    if (state->queues_[_index].running_.load(std::memory_order_acquire))
+      return true;
+  }
+  return false;
+}
+
 } // namespace frameworkcpp::reactor::detail
 
 namespace frameworkcpp::reactor {
@@ -64,6 +129,55 @@ inline bool io_uring_available() noexcept {
 
 inline reactor_t::~reactor_t() {
   stop_all();
+  release_state();
+}
+
+// Suelta el estado del reactor: destruye los objetos que viven sobre el memory
+// del usuario y devuelve los bloques al memory store. Con eso la memory queda
+// libre para otra instancia del reactor con la misma configuracion.
+inline void reactor_t::release_state() noexcept {
+  // Una queue en marcha esta usando su estado: no se suelta hasta que su
+  // hilo termine. Perder su ring es mejor que destruirlo debajo de sus pies.
+  if (detail::queues_running(&state_, state_.built_queues_))
+    return;
+
+  // Sin estado no hay reactor: las demas llamadas lo rechazan.
+  bound_ = false;
+
+  if (state_.strands_ != nullptr) {
+    for (std::size_t _index = 0; _index < state_.built_strands_; ++_index)
+      state_.strands_[_index].~strand_t();
+    state_.built_strands_ = 0;
+  }
+  detail::release_queues(&state_, state_.built_queues_);
+  state_.built_queues_ = 0;
+
+  if (shard_) {
+    for (auto &_block : state_.blocks_) {
+      if (_block == nullptr)
+        continue;
+      shard_.deallocate_bytes(_block);
+      _block = nullptr;
+    }
+  }
+
+  state_.queues_ = nullptr;
+  state_.queue_handles_ = nullptr;
+  state_.ops_ = nullptr;
+  state_.op_ring_ = nullptr;
+  state_.sockets_ = nullptr;
+  state_.strands_ = nullptr;
+  state_.timers_ = nullptr;
+  state_.timer_heap_ = nullptr;
+  state_.events_ = nullptr;
+}
+
+// Devuelve al memory store los bloques carveados. El reactor queda sin estado:
+// despues de esto solo puede volver a hacer bind_memory.
+inline void reactor_t::release_memory() noexcept {
+  stop_all();
+  release_state();
+  shard_ = memory::memory_shard_t{};
 }
 
 inline bool reactor_t::bind_memory(memory::memory_t &memory_owner,
@@ -86,14 +200,7 @@ inline bool reactor_t::bind_memory(memory::memory_t &memory_owner,
   // Si el bind falla, el reactor queda como si nunca se hubiera llamado: un
   // reintento no debe encontrar un estado a medias.
   const auto _reset_k = [this]() noexcept {
-    state_.queues_ = nullptr;
-    state_.queue_handles_ = nullptr;
-    state_.ops_ = nullptr;
-    state_.op_ring_ = nullptr;
-    state_.sockets_ = nullptr;
-    state_.strands_ = nullptr;
-    state_.timers_ = nullptr;
-    state_.timer_heap_ = nullptr;
+    release_state();
     state_.num_queues_ = 0;
     state_.num_sockets_ = 0;
     state_.num_strands_ = 0;
@@ -101,6 +208,15 @@ inline bool reactor_t::bind_memory(memory::memory_t &memory_owner,
     affinity_ = false;
     concurrency_ = {};
   };
+
+  // Un bind anterior puede haber dejado queues en marcha: no se puede
+  // reconstruir el estado mientras un hilo las sirve.
+  if (detail::queues_running(&state_, state_.built_queues_))
+    return false;
+
+  // Un bind anterior devuelve sus bloques al memory store: se sueltan antes de
+  // carvearlos otra vez, o sus descriptores se filtrarian.
+  release_state();
 
   memory::object_spec_t _specs[reactor_spec_count_k] = {};
   make_specs(config, _specs);
@@ -125,29 +241,42 @@ inline bool reactor_t::bind_memory(memory::memory_t &memory_owner,
   auto *_queues_raw = _shard.allocate_tagged(reactor_shard_tag_k,
                                              sizeof(detail::queue_control_t) * config.queues_,
                                              alignof(detail::queue_control_t));
+  state_.blocks_[0] = _queues_raw;
   auto *_handles_raw = _shard.allocate_tagged(
       reactor_shard_tag_k + 1, sizeof(queue_t) * config.queues_, alignof(queue_t));
+  state_.blocks_[1] = _handles_raw;
   auto *_ops_raw = _shard.allocate_tagged(
       reactor_shard_tag_k + 2, sizeof(detail::op_t) * _total_ops_k, alignof(detail::op_t));
+  state_.blocks_[2] = _ops_raw;
   auto *_ring_raw = _shard.allocate_tagged(
       reactor_shard_tag_k + 3, sizeof(detail::op_t *) * _total_ops_k, alignof(detail::op_t *));
+  state_.blocks_[3] = _ring_raw;
   auto *_sockets_raw = _shard.allocate_tagged(reactor_shard_tag_k + 4,
                                               sizeof(detail::socket_slot_t) * config.max_sockets_,
                                               alignof(detail::socket_slot_t));
+  state_.blocks_[4] = _sockets_raw;
   auto *_strands_raw = _shard.allocate_tagged(reactor_shard_tag_k + 5,
                                               sizeof(detail::strand_t) * _total_strands_k,
                                               alignof(detail::strand_t));
+  state_.blocks_[5] = _strands_raw;
 
   auto *_timers_raw = _shard.allocate_tagged(
       reactor_shard_tag_k + 6, sizeof(detail::op_t) * _total_timers_k, alignof(detail::op_t));
+  state_.blocks_[6] = _timers_raw;
   auto *_timer_heap_raw = _shard.allocate_tagged(
       reactor_shard_tag_k + 7, sizeof(detail::op_t *) * _total_timers_k, alignof(detail::op_t *));
+  state_.blocks_[7] = _timer_heap_raw;
   auto *_events_raw = _shard.allocate_tagged(reactor_shard_tag_k + 8,
                                              sizeof(struct epoll_event) * _total_ops_k,
                                              alignof(struct epoll_event));
+  state_.blocks_[8] = _events_raw;
   auto *_sequence_raw = _shard.allocate_tagged(reactor_shard_tag_k + 9,
                                                sizeof(std::atomic<std::size_t>) * _total_ops_k,
                                                alignof(std::atomic<std::size_t>));
+  state_.blocks_[9] = _sequence_raw;
+  // El shard se guarda antes de carvearlo: si una de las reservas falla, el
+  // bind devuelve los bloques que si alcanzó a tomar.
+  shard_ = _shard;
 
   if (_queues_raw == nullptr || _handles_raw == nullptr || _ops_raw == nullptr ||
       _ring_raw == nullptr || _sockets_raw == nullptr || _strands_raw == nullptr ||
@@ -173,6 +302,7 @@ inline bool reactor_t::bind_memory(memory::memory_t &memory_owner,
 
   for (std::size_t _index = 0; _index < _total_strands_k; ++_index)
     new (static_cast<void *>(&state_.strands_[_index])) detail::strand_t();
+  state_.built_strands_ = _total_strands_k;
 
   for (std::size_t _index = 0; _index < _total_timers_k; ++_index) {
     new (static_cast<void *>(&state_.timers_[_index])) detail::op_t();
@@ -191,6 +321,7 @@ inline bool reactor_t::bind_memory(memory::memory_t &memory_owner,
 
   for (std::size_t _index = 0; _index < config.queues_; ++_index) {
     new (static_cast<void *>(&state_.queues_[_index])) detail::queue_control_t();
+    state_.built_queues_ = _index + 1;
     auto *_sequence_k = reinterpret_cast<std::atomic<std::size_t> *>(
         _sequence_raw + (_index * config.max_jobs_per_queue_ * sizeof(std::atomic<std::size_t>)));
     if (!state_.queues_[_index].op_queue_.init(
@@ -230,6 +361,17 @@ inline bool reactor_t::bind_memory(memory::memory_t &memory_owner,
       }
       state_.queues_[_index].events_base_ = &state_.events_[_events_offset_k];
       state_.queues_[_index].events_per_worker_ = config.max_jobs_per_queue_;
+    }
+    state_.queues_[_index].wake_fd_.store(::eventfd(0, EFD_CLOEXEC), std::memory_order_release);
+    if (state_.queues_[_index].wake_fd_.load(std::memory_order_acquire) < 0) {
+      _reset_k();
+      return false;
+    }
+    if (state_.queues_[_index].use_epoll_ &&
+        !state_.queues_[_index].epoll_.add(
+            state_.queues_[_index].wake_fd_.load(std::memory_order_acquire), EPOLLIN, 0)) {
+      _reset_k();
+      return false;
     }
     state_.queues_[_index].strands_ = &state_.strands_[_index * config.max_strands_];
     state_.queues_[_index].num_strands_ = config.max_strands_;
@@ -410,6 +552,7 @@ inline std::uint64_t reactor_t::schedule_timer(queue_t *queue,
     return 0;
   }
   _qc->timers_live_.fetch_add(1, std::memory_order_acq_rel);
+  detail::wake_queue(_qc);
   return _id_k;
 }
 
@@ -435,6 +578,7 @@ inline bool reactor_t::cancel_timer(queue_t *queue, std::uint64_t timer_id) cons
     _op->done_.store(true, std::memory_order_release);
     return false;
   }
+  detail::wake_queue(_qc);
   return true;
 }
 
@@ -1063,6 +1207,7 @@ inline void reactor_t::run_queue(std::size_t index, std::size_t worker) const no
   if (affinity_)
     (void) detail::pin_thread_to_cpu((index * _workers_k) + worker);
   _qc->running_.store(true, std::memory_order_release);
+  detail::arm_wake_read(_qc);
   while (!_qc->stop_.load(std::memory_order_acquire)) {
     for (std::size_t _strand = 0; _strand < _qc->num_strands_; ++_strand) {
       auto *_strand_op = _qc->strands_[_strand].try_dispatch();
@@ -1077,14 +1222,32 @@ inline void reactor_t::run_queue(std::size_t index, std::size_t worker) const no
       continue;
     }
     reactor_t::expire_timers(_qc);
+    // Dormir solo si de verdad no hay trabajo. El productor limpia el flag y
+    // escribe el eventfd cuando encuentra la cola dormida; el re-chequeo
+    // cierra la ventana entre marcar dormido y bloquear.
+    _qc->sleeping_.store(true, std::memory_order_seq_cst);
+    if (_qc->stop_.load(std::memory_order_acquire) || _qc->op_queue_.has_work()) {
+      _qc->sleeping_.store(false, std::memory_order_seq_cst);
+      continue;
+    }
+    detail::arm_wake_read(_qc);
     if (_qc->use_epoll_) {
       auto *_events_k = _qc->events_base_ + (worker * _qc->events_per_worker_);
       const int _count_k =
           _qc->epoll_.wait(_events_k, _qc->events_per_worker_, wait_timeout_ms(_qc));
+      _qc->sleeping_.store(false, std::memory_order_seq_cst);
       for (int _i = 0; _i < _count_k; ++_i) {
         const auto &_ev = _events_k[static_cast<std::size_t>(_i)];
         detail::socket_slot_t *_slot = nullptr;
         const std::uint64_t _token_k = _ev.data.u64;
+        if (_token_k == 0) {
+          // Evento del eventfd de wake: drenarlo para que epoll no lo repita.
+          std::uint64_t _value_k = 0;
+          const int _wake_fd_k = _qc->wake_fd_.load(std::memory_order_acquire);
+          const ssize_t _read_k = ::read(_wake_fd_k, &_value_k, sizeof(_value_k));
+          (void) _read_k;
+          continue;
+        }
         if (_token_k >= 1 && _token_k <= _qc->num_sockets_)
           _slot = &_qc->sockets_[static_cast<std::size_t>(_token_k) - 1];
         detail::op_t *_op_ev = nullptr;
@@ -1113,6 +1276,7 @@ inline void reactor_t::run_queue(std::size_t index, std::size_t worker) const no
         const auto _wait_ns_k = (_next_k > _now_k) ? (_next_k - _now_k) : 0;
         std::this_thread::sleep_for(std::chrono::nanoseconds(_wait_ns_k));
       }
+      _qc->sleeping_.store(false, std::memory_order_seq_cst);
       continue;
     }
     std::size_t _op_index_k = 0;
@@ -1137,8 +1301,16 @@ inline void reactor_t::run_queue(std::size_t index, std::size_t worker) const no
         _got_k = true;
       }
     }
-    if (_got_k)
-      reactor_t::complete_op(_qc, _op_index_k, _res_k);
+    _qc->sleeping_.store(false, std::memory_order_seq_cst);
+    if (_got_k) {
+      if (_op_index_k == detail::wake_user_data_k) {
+        // El read del eventfd ya consumio el contador. El read se rearma antes
+        // de la siguiente espera, que es el unico sitio donde hace falta.
+        _qc->wake_armed_ = false;
+      } else {
+        reactor_t::complete_op(_qc, _op_index_k, _res_k);
+      }
+    }
   }
   _qc->running_.store(false, std::memory_order_release);
 }
@@ -1146,16 +1318,25 @@ inline void reactor_t::run_queue(std::size_t index, std::size_t worker) const no
 inline void reactor_t::stop_all() noexcept {
   if (!bound_)
     return;
+  // El reactor deja de estar disponible antes de soltar el estado: ninguna
+  // otra llamada puede entrar mientras se desmonta.
+  bound_ = false;
   state_.running_.store(false, std::memory_order_release);
   for (std::size_t _index = 0; _index < state_.num_queues_; ++_index) {
     auto *_qc = &state_.queues_[_index];
     _qc->stop_.store(true, std::memory_order_release);
+    detail::wake_queue(_qc);
     const std::size_t _workers_k = _qc->workers_ == 0 ? 1 : _qc->workers_;
     for (std::size_t _w = 0; _w < _workers_k; ++_w)
       if (_qc->threads_[_w].joinable())
         _qc->threads_[_w].join();
+    // Los hilos ya no leen el eventfd, asi que se puede cerrar. El ring se
+    // suelta en el destructor: mientras el reactor viva, sus recursos son
+    // suyos.
+    const int _wake_fd_k = _qc->wake_fd_.exchange(-1, std::memory_order_acq_rel);
+    if (_wake_fd_k >= 0)
+      ::close(_wake_fd_k);
   }
-  bound_ = false;
 }
 
 // --- queue_t ---
@@ -1202,6 +1383,7 @@ inline bool queue_t::post(op_kind_t kind,
         _op->done_.store(true, std::memory_order_release);
         return false;
       }
+      detail::wake_queue(control_);
       return true;
     }
   }
@@ -1390,6 +1572,7 @@ inline bool socket_t::close() noexcept {
     _op->done_.store(true, std::memory_order_release);
     return false;
   }
+  detail::wake_queue(_qc);
   _slot->close_pending_.store(true, std::memory_order_release);
   return true;
 }

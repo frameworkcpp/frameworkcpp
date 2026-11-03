@@ -49,6 +49,7 @@ class reactor_t {
 
     void run_all() noexcept;
     void stop_all() noexcept;
+    void release_memory() noexcept;
 
     static constexpr std::size_t precompute(const reactor_config_t &config) noexcept;
 };
@@ -71,6 +72,9 @@ single thread, before you post anything.
 - After it succeeds, `memory.get_used()` has grown by exactly
   `precompute(config)` bytes.
 - The memory must outlive the reactor.
+- The reactor gives the blocks back when it is destroyed, so the same memory
+  can host another reactor afterwards. Binding again on the same reactor needs
+  the same configuration: the shard keeps the layout of its first bind.
 
 ```cpp
 reactor::reactor_t reactor;
@@ -381,6 +385,36 @@ timeout, so it notices a stop request promptly.
 
 `stop_all` signals every queue to stop and joins the threads. It is safe to call
 it when nothing is running, and the destructor calls it for you.
+
+The reactor owns a few descriptors of the process — the `io_uring` ring, the
+`epoll` set and the descriptor that wakes a sleeping queue — and releases them
+when it is destroyed. A reactor that is bound and never destroyed keeps them,
+so a system that binds and drops reactors repeatedly does not accumulate
+descriptors.
+
+## release_memory
+
+```cpp
+void release_memory() noexcept;
+```
+
+Gives the carved blocks back to the memory store and tears the reactor down:
+the queues stop, the descriptors are released and the reactor becomes unbound.
+The memory is then free for another reactor with the same configuration.
+
+Use it when a long-lived memory has to host a reactor that comes and goes.
+The destructor does the same thing, so you only need it to release the memory
+before the reactor itself goes away.
+
+```cpp
+reactor::reactor_t reactor;
+if (!reactor.bind_memory(memory, config))
+    throw std::runtime_error("reactor: not enough memory");
+
+// ... serve ...
+
+reactor.release_memory();   // the memory is free again
+```
 
 ```cpp
 reactor.run_all();
