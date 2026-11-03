@@ -80,6 +80,17 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release"
       }
+    },
+    {
+      "name": "bench",
+      "inherits": "base",
+      "displayName": "Release + benchmarks",
+      "description": "Optimized build with Google Benchmark targets",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "FRAMEWORKCPP_BUILD_TESTING": "OFF",
+        "FRAMEWORKCPP_BUILD_BENCHMARKS": "ON"
+      }
     }
   ],
   "buildPresets": [
@@ -102,6 +113,10 @@
     {
       "name": "release",
       "configurePreset": "release"
+    },
+    {
+      "name": "bench",
+      "configurePreset": "bench"
     }
   ],
   "testPresets": [

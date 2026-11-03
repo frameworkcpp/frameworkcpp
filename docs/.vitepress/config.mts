@@ -18,8 +18,11 @@ export default defineConfig({
 
     sidebar: [
       {
-        text: 'Getting Started',
-        link: '/getting-started'
+        text: 'Introduction',
+        items: [
+          { text: 'Getting Started', link: '/getting-started' },
+          { text: 'Benchmarks', link: '/benchmarks' }
+        ]
       },
       {
         text: 'Memory',
@@ -56,7 +59,8 @@ export default defineConfig({
       {
         text: 'Contribute',
         items: [
-          { text: 'Documentation', link: '/contribute/documentation' }
+          { text: 'Writing Documentation', link: '/contribute/documentation' },
+          { text: 'Measuring Performance', link: '/contribute/measuring' }
         ]
       }
     ],

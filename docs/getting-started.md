@@ -52,8 +52,8 @@ cmake --build --preset debug
 ctest --preset debug
 ```
 
-The other presets are `asan`, `tsan`, `ubsan` and `release`. Sanitizer builds
-pull in Clang through the preset:
+The other presets are `asan`, `tsan`, `ubsan`, `release` and `bench`. Sanitizer
+builds pull in Clang through the preset:
 
 ```bash
 cmake --preset asan && cmake --build --preset asan && ctest --preset asan
@@ -61,6 +61,30 @@ cmake --preset asan && cmake --build --preset asan && ctest --preset asan
 
 > TSAN needs a 64-bit platform, and sanitizers do not run on QEMU-emulated
 > architectures; the CI matrix encodes exactly which combinations are valid.
+
+## Measuring the hot paths
+
+The `bench` preset builds an optimised binary with the Google Benchmark targets
+for the memory, environment and reactor modules:
+
+```bash
+cmake --preset bench
+cmake --build --preset bench
+./build/bench/benchmarks/frameworkcpp_memory_bench
+```
+
+Each binary takes the usual Google Benchmark flags, so you can narrow the run or
+write the results to a file. The suite reports a full distribution per
+operation — `min`, percentiles, `max` — across one-thread and multi-thread
+variants. See [Benchmarks](/benchmarks) for what each benchmark measures and
+how to read the numbers, and [Measuring Performance](/contribute/measuring)
+for the strategy behind them.
+
+The benchmarks cover the cost of allocations, the environment API and the
+reactor's post/dispatch/echo paths. They exist to tell the truth about this
+commit on this machine, not to enforce a threshold: a number that moved is a
+question to answer, not a failure. CI runs the same binaries natively on
+`amd64` and `arm64` and uploads the JSON results as build artifacts.
 
 ## Installing it as a CMake package
 

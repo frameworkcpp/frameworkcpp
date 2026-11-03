@@ -67,6 +67,12 @@ class op_queue_t {
   op_t *pop() noexcept;
 
   [[nodiscard]] std::size_t size() const noexcept;
+
+  // Indica si hay operaciones pendientes. Solo lee los dos indices atomicos:
+  // no toma los mutexes, asi que el event loop puede comprobarlo sin bloquear
+  // ni competir con los productores.
+  [[nodiscard]] bool has_work() const noexcept;
+
   [[nodiscard]] queue_concurrency_t get_concurrency() const noexcept { return concurrency_; }
 
   private:
@@ -241,6 +247,13 @@ inline std::size_t op_queue_t::size() const noexcept {
   if (concurrency_.consumers_ == concurrency_model_t::thread_safe_)
     _consumer_lock_k.lock();
   return tail_.load(std::memory_order_acquire) - head_.load(std::memory_order_acquire);
+}
+
+// El indice del productor avanza antes de publicar la operacion, asi que la
+// comparacion puede sobreestimar el trabajo pendiente. Sobreestimar es
+// seguro: el hilo de la queue no se duerme, comprueba de nuevo y sigue.
+inline bool op_queue_t::has_work() const noexcept {
+  return tail_.load(std::memory_order_acquire) != head_.load(std::memory_order_acquire);
 }
 
 } // namespace frameworkcpp::reactor::detail

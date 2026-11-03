@@ -295,6 +295,11 @@ class reactor_t {
 
   void stop_all() noexcept;
 
+  // Devuelve al memory store los bloques que el reactor carveo. La memory
+  // queda libre para otra instancia del reactor con la misma configuracion.
+  // El destructor lo hace por su cuenta.
+  void release_memory() noexcept;
+
   // Contrato estándar de precomputo compile-time (ver reactor_config.hpp).
   static constexpr std::size_t precompute(const reactor_config_t &config) noexcept {
     return reactor::precompute(config);
@@ -311,8 +316,10 @@ class reactor_t {
   static void expire_timers(detail::queue_control_t *qc) noexcept;
   void run_queue(std::size_t index, std::size_t worker) const noexcept;
   std::uint64_t next_timer_id() noexcept;
+  void release_state() noexcept;
 
   detail::reactor_state_t state_{};
+  memory::memory_shard_t shard_;
   std::atomic<std::uint64_t> timer_id_{1};
   queue_concurrency_t concurrency_ = {};
   std::size_t workers_per_queue_ = 1;

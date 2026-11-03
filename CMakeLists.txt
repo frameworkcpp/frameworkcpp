@@ -13,6 +13,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(FRAMEWORKCPP_BUILD_TESTING "Build tests" ON)
+option(FRAMEWORKCPP_BUILD_BENCHMARKS "Build benchmarks" OFF)
 
 # El módulo reactor usa io_uring a través de liburing. Se puede desactivar si
 # la plataforma no lo soporta.
@@ -157,6 +158,22 @@ if(FRAMEWORKCPP_BUILD_TESTING)
     endif()
 endif()
 
+# --- Benchmarks --------------------------------------------------------------
+if(FRAMEWORKCPP_BUILD_BENCHMARKS)
+    include(FetchContent)
+    set(BENCHMARK_ENABLE_TESTING OFF CACHE BOOL "" FORCE)
+    set(BENCHMARK_ENABLE_GTEST_TESTS OFF CACHE BOOL "" FORCE)
+    set(BENCHMARK_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(
+        benchmark
+        GIT_REPOSITORY https://github.com/google/benchmark.git
+        GIT_TAG v1.10.0
+        GIT_SHALLOW TRUE
+    )
+    FetchContent_MakeAvailable(benchmark)
+    add_subdirectory(benchmarks)
+endif()
+
 # --- Lint -------------------------------------------------------------------
 find_program(_frameworkcpp_clang_format NAMES clang-format clang-format-19)
 if(_frameworkcpp_clang_format)
@@ -168,6 +185,11 @@ if(_frameworkcpp_clang_format)
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cpp)
         list(APPEND _frameworkcpp_format_sources ${_frameworkcpp_format_tests})
     endif()
+    # Los benchmarks se formatean siempre: el preset de debug no los compila,
+    # pero el codigo sigue siendo del repositorio.
+    file(GLOB_RECURSE _frameworkcpp_format_benchmarks CONFIGURE_DEPENDS
+        ${CMAKE_CURRENT_SOURCE_DIR}/benchmarks/*.cpp)
+    list(APPEND _frameworkcpp_format_sources ${_frameworkcpp_format_benchmarks})
 
     if(NOT TARGET format)
         add_custom_target(format
