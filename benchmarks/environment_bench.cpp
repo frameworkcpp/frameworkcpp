@@ -14,7 +14,19 @@ using frameworkcpp::environment::get_env;
 using frameworkcpp::environment::get_environment_memory_config;
 using frameworkcpp::environment::init;
 using frameworkcpp::environment::set_env;
+using frameworkcpp::environment::shutdown;
 using frameworkcpp::memory::memory_t;
+
+// The per-thread views point into the memory: the module handle has to go
+// away before the memory does, or the TLS destructor touches freed memory.
+struct shutdown_guard_t {
+  shutdown_guard_t() = default;
+  shutdown_guard_t(const shutdown_guard_t &) = delete;
+  shutdown_guard_t &operator=(const shutdown_guard_t &) = delete;
+  shutdown_guard_t(shutdown_guard_t &&) = delete;
+  shutdown_guard_t &operator=(shutdown_guard_t &&) = delete;
+  ~shutdown_guard_t() { shutdown(); }
+}; // struct shutdown_guard_t
 
 constexpr std::string_view key_k = "FRAMEWORKCPP_BENCH_KEY";
 constexpr std::string_view value_k = "0123456789abcdef0123456789abcdef";
@@ -57,6 +69,7 @@ int main(int argc, char **argv) {
   try {
     auto _config = make_config();
     memory_t _memory{get_environment_memory_config(_config)};
+    const shutdown_guard_t _guard_k;
     init(_memory, _config);
     if (!set_env(key_k, value_k))
       return 1;
