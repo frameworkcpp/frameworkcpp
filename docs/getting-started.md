@@ -71,24 +71,20 @@ for the memory, environment and reactor modules:
 cmake --preset bench
 cmake --build --preset bench
 ./build/bench/benchmarks/frameworkcpp_memory_bench
-./build/bench/benchmarks/frameworkcpp_environment_bench
-./build/bench/benchmarks/frameworkcpp_reactor_bench
 ```
 
 Each binary takes the usual Google Benchmark flags, so you can narrow the run or
-write the results to a file:
+write the results to a file. The suite reports a full distribution per
+operation — `min`, percentiles, `max` — across one-thread and multi-thread
+variants. See [Benchmarks](/benchmarks) for what each benchmark measures and
+how to read the numbers, and [Measuring Performance](/contribute/measuring)
+for the strategy behind them.
 
-```bash
-./build/bench/benchmarks/frameworkcpp_reactor_bench \
-  --benchmark_filter='reactor/post_empty.*' \
-  --benchmark_out=reactor.json --benchmark_out_format=json
-```
-
-The reactor benchmarks cover the cost of posting, the latency of a burst and the
-round trip of an echo over a socket. They exist to compare two runs, not to
-enforce a threshold: a number that moved is a question to answer, not a failure.
-CI runs the same binaries natively on `amd64` and `arm64` and uploads the JSON
-results as build artifacts.
+The benchmarks cover the cost of allocations, the environment API and the
+reactor's post/dispatch/echo paths. They exist to tell the truth about this
+commit on this machine, not to enforce a threshold: a number that moved is a
+question to answer, not a failure. CI runs the same binaries natively on
+`amd64` and `arm64` and uploads the JSON results as build artifacts.
 
 ## Installing it as a CMake package
 
