@@ -133,3 +133,29 @@ footprint itself is exact.
   by name, not walk a map.
 - **No exceptions on the hot path**: `get_env` and `set_env` never throw; only
   `init` does, and only at setup.
+
+## Trade-offs
+
+- **Immutability means write amplification.** Every `set_env` builds a new value
+  cell instead of editing the old one. The old cell is retired and recycled
+  later. This gives lock-free reads but uses more memory cells than an
+  in-place update would.
+- **Reads are fast when the thread is current, slower when it drifts.** A
+  warmed-up thread reads from its private cache. A thread that has not read
+  recently replays the journal to catch up — the first read after a gap pays
+  the replay cost. In a system where every thread reads constantly, the
+  amortised cost is near zero.
+- **`set_env` fails silently on back-pressure.** When the value pool is pinned
+  by lagging readers, `set_env` returns `false` instead of blocking. The write
+  is lost, not queued. You must decide whether to retry, drop the update, or
+  enlarge the pool — the framework does not decide for you.
+- **Process environment is ingested whole at `init`.** Even if your `.env` file
+  declares ten keys, the module reserves capacity for every variable the
+  process inherited. Set `read_process_env_ = false` if you want the file to be
+  the single source of truth and avoid the overhead.
+
+## Where to go next
+
+- [Lifecycle](lifecycle) — `init`, `shutdown`, and the threading rules.
+- [Internals](internals) — the key table, value cells, journal, and version protocol.
+- [Configuration](configuration) — the fixed capacities and how to size the memory.

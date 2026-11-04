@@ -196,3 +196,36 @@ config.queues_ = 4;
 config.max_jobs_per_queue_ = 256;
 config.max_sockets_ = 16384;
 ```
+
+## Trade-offs
+
+- **Queue count is parallelism, not magic.** Each queue is an independent event
+  loop with its own thread and its own `io_uring` ring. More queues give more
+  throughput but also more cache pressure, more file descriptors, and more
+  contention on the shared kernel structures. Start with one queue per core
+  and measure.
+- **`affinity_` is best-effort.** Pinning queue *n* to CPU *n* keeps the cache
+  warm, but the OS can still migrate the thread if the core is busy. Do not
+  assume hard affinity; treat it as a hint that usually works.
+- **Operation pool is per-queue, not shared.** A queue with a full pool cannot
+  steal operations from an idle queue. Size each queue's pool for its own
+  peak, not the system average. If one queue is hot and another cold, you
+  cannot rebalance the pool — you must over-provision.
+- **`max_jobs_per_queue_` must be a power of two.** The ring buffer indices
+  wrap with a bitmask. The constructor rejects non-powers-of-two with
+  `std::invalid_argument`.
+- **Strand count is a hash table size.** `max_strands_` is the modulo for
+  strand ids. Two distinct strand ids that collide modulo this number share
+  the same strand slot and will serialise unintentionally. Size it larger
+  than the number of simultaneous strands you expect, or accept the collision
+  probability.
+- **Timer precision depends on the backend.** `io_uring` gives nanosecond
+  precision; `epoll` gives millisecond precision. If your system needs
+  sub-millisecond timers, you must ensure `io_uring` is available and force
+  `backend_t::io_uring_`.
+
+## Where to go next
+
+- [The API](api) — every function, its contract and its failure modes.
+- [Internals](internals) — the ring, the operation pool, and the strand protocol.
+- [Memory reservation](../memory/reservation) — the contract every module follows for compile-time sizing.

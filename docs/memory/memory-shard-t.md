@@ -5,7 +5,7 @@ A memory store by itself is just a big reserved block. To actually use it you ca
 buckets. The shard view (`memory_shard_t`) is what you allocate from.
 
 ```cpp
-#include "frameworkcpp/memory/memory.hpp">   // to create the shard (memory_t)
+#include <frameworkcpp/memory/memory.hpp>   // to create the shard (memory_t)
 ```
 
 The examples below build a memory store, so they need `memory.hpp`. If you are handed a
@@ -133,3 +133,32 @@ auto* slot = shard.allocate<std::uint32_t>();
 shard.deallocate(slot);                      // back to the bucket, reusable
 std::cout << shard.get_stats(0).freed_ << "\n";   // 1
 ```
+
+## Trade-offs
+
+- **Shard allocation is a smallest-fit search.** `allocate<T>()` scans the
+  shard's buckets for the smallest one that fits `count * sizeof(T)` with the
+  required alignment. The scan is fast (a few array lookups) but it is not
+  zero-cost. For a known bucket, `get_bucket(tag, model)` and
+  `bucket.allocate<T>()` is faster because it skips the search.
+- **No constructor, no destructor.** The shard hands you raw memory. You are
+  responsible for running constructors (placement `new`) and destructors
+  (explicit `~T()`). The [smart pointers](smart-pointers) automate this.
+- **Header overhead lives in the slot.** Every slot carries an offset to its
+  owning bucket so `deallocate` can return it without a global lookup. The
+  header is small (a few bytes) but for tiny objects it is a noticeable
+  fraction of the block.
+- **Tag reuse returns the same shard.** `create_shard(tag, specs)` is
+  idempotent: asking for an existing tag returns the same shard view. This is
+  convenient but means you cannot re-configure a shard by calling `create_shard`
+  again with different specs — the old specs win.
+- **Deallocate ignores foreign pointers.** Passing a pointer from another shard
+  (or from `malloc`/`new`) to `shard.deallocate()` silently does nothing. There
+  is no cross-shard owner lookup by design — the framework assumes you track
+  which shard handed out which pointer.
+
+## Where to go next
+
+- [Buckets](memory-bucket) — the pools of same-size slots inside a shard.
+- [Smart Pointers](smart-pointers) — RAII owners that construct and destruct for you.
+- [Allocators & std::pmr](allocator) — the standard allocator bridge.

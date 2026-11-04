@@ -92,3 +92,9 @@ claims a free slot the first time it touches the store and hands it back when th
 thread exits, so slots are recycled rather than consumed; if every slot is in use
 at once, `get_env` still works by reading the global slot directly (just
 slower). The memory must outlive every reader and writer.
+
+## Where to go next
+
+- [The API](api) — `get_env`, `set_env`, and the introspection helpers.
+- [Configuration](configuration) — the fixed capacities and how to size the memory.
+- [Internals](internals) — the key table, value cells, journal, and version protocol.

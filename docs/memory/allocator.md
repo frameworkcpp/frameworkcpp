@@ -7,8 +7,8 @@ bridge is for: the memory store talks the standard allocator language, so it can
 allocator contract.
 
 ```cpp
-#include "frameworkcpp/memory/memory_allocator.hpp">   // memory_allocator_t<T> + memory_resource_t
-#include "frameworkcpp/memory/memory.hpp">             // to build the memory store in the examples
+#include <frameworkcpp/memory/memory_allocator.hpp>   // memory_allocator_t<T> + memory_resource_t
+#include <frameworkcpp/memory/memory.hpp>   // to build the memory store in the examples
 ```
 
 ## The standard allocator
@@ -64,3 +64,27 @@ interchangeable.
   block big enough for its peak, or allocation throws `std::bad_alloc`.
 - Blocks are reused in place: keep `object_size_` large enough for the biggest
   data you will write into any single block.
+
+## Trade-offs
+
+- **Allocator equality is strict.** Two allocators over different shards are not
+  equal, so a container copied from one shard to another will not silently
+  keep the original's allocator — it will use the destination's allocator.
+  This prevents silent misallocation but means you must manage shard identity
+  explicitly when containers move between shards.
+- **Block size is a peak budget.** A `std::vector` that grows to 1 KiB needs a
+  1 KiB bucket block even if it shrinks back to 1 byte; the block is not
+  split or merged. Size the bucket for the peak, not the average.
+- **Exhaustion is `std::bad_alloc`.** The allocator never blocks and never
+  retries. If the bucket is empty, the container throws — which is the
+  standard contract but can surprise code that assumes `reserve` always works.
+- **PMR adds an indirection.** `memory_resource_t` is a virtual base; every
+  allocation goes through a virtual call. For a hot path, the template
+  `memory_allocator_t<T>` is faster because the compiler sees the concrete
+  type.
+
+## Where to go next
+
+- [The Memory Store](memory-t) — owns the memory and carves the shards.
+- [Shards](memory-shard-t) — the slice that holds your buckets.
+- [Smart Pointers](smart-pointers) — RAII owners that return memory on their own.

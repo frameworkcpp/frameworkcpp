@@ -62,6 +62,35 @@ CI runs the same binaries natively on `amd64` and `arm64` and uploads the JSON
 artifacts, so every commit carries the numbers of the runner it was built on.
 Nothing gates on them: benchmarks are a lens, not a check.
 
+## Running the suite the way CI runs it
+
+One command does the whole thing — configure, build, run the three binaries in
+the CI order, and write the JSON results:
+
+```bash
+tools/run-benchmarks.sh
+```
+
+It prints the timestamp and the binary name around each run, exactly like the
+CI log, so a local run and a CI run read the same. The JSON lands in
+`build/bench/results/<timestamp>/`, one file per binary, named as the CI
+artifacts are (`memory-amd64.json`, `environment-amd64.json`,
+`reactor-amd64.json`).
+
+Two options make it useful while you work:
+
+```bash
+tools/run-benchmarks.sh --filter 'memory/.*'
+tools/run-benchmarks.sh --baseline build/bench/results/2026-11-03T21-06-25Z
+```
+
+The first narrows the run to part of the suite. The second compares the new
+run against an older one and prints the delta per benchmark, so a change you
+suspect shows up as a number and not as a feeling.
+
+The build step is incremental, and `--no-build` skips it when you only want to
+run the binaries that are already there.
+
 ## Reading the output
 
 ```text

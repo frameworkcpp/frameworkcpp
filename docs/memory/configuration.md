@@ -6,7 +6,7 @@ the reference for the knobs: the concurrency models, the bucket spec, the memory
 settings and the compile-time footprints.
 
 ```cpp
-#include "frameworkcpp/memory/memory.hpp">
+#include <frameworkcpp/memory/memory.hpp>
 ```
 
 ::: tip Vocabulary
@@ -136,3 +136,27 @@ memory.create_shard(1, {workers_k[0]});
 memory.create_shard(2, {controls_k[0]});
 // memory.get_capacity() == budget_k — nothing extra was ever mmap'd
 ```
+
+## Trade-offs
+
+- **Fixed registry caps at compile time.** `max_shards_` and `max_regions_` are
+  bounded by `max_memory_shards_k` and `max_memory_regions_k`. You cannot add
+  more shards at runtime than the compile-time constant allows. Raise the
+  constant if you need more, but the array size grows with it.
+- **Hard limit is enforced on reserved bytes, not live objects.** A `mmap`
+  region that is partially empty still counts against the limit. This prevents
+  silent paging but means you must size for the worst-case reservation, not the
+  steady-state working set.
+- **`touch_pages_ = true` trades RSS for deterministic first-use latency.**
+  Pre-faulting pages on `mmap` makes the first access instant but increases
+  resident memory immediately. Use it when the deadline budget includes the
+  first touch; leave it off when you want to pay for pages only when you use them.
+- **The warning callback is one-shot.** `on_warning_` fires once when the soft
+  limit is crossed and is then disabled. If you need periodic monitoring, poll
+  `is_soft_limit_exceeded()` instead.
+
+## Where to go next
+
+- [The Memory Store](memory-t) — owns the memory and carves the shards.
+- [Buckets](memory-bucket) — the pools of same-size slots.
+- [Shards](memory-shard-t) — the slice that holds your buckets.

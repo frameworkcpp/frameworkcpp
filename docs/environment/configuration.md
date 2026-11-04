@@ -141,3 +141,28 @@ momentarily pinned by lagging readers. Values are recycled, so this is not a
 lifetime budget — it is transient back-pressure that clears when the lagging
 views move on. There is no need to reload the module; if a long-lived thread
 reads rarely, either let it read periodically or give the pool more cells.
+
+## Trade-offs
+
+- **Capacities are fixed at `init` and never grow.** If you under-size
+  `max_keys_` or `value_cells_`, the module throws or returns `false` at
+  runtime. Size for the peak, not the average, or accept the failure mode.
+- **`max_threads_` is a view pool, not a thread limit.** Threads beyond the
+  pool still read — they just fall back to the global slots instead of a
+  private cache. The pool is about cache efficiency, not correctness.
+- **`journal_size_` bounds how far behind a reader may drift.** A reader that
+  falls behind the journal reseeds from the global slots (slower but correct).
+  A larger journal tolerates more lag but uses more memory.
+- **`value_cells_` is memory, not a write count.** Because cells are recycled,
+  you can write millions of times as long as the live + retired cells fit in
+  the pool. The pool only exhausts when a view stops advancing and pins every
+  retired cell.
+- **Process environment counts against `max_keys_` and `value_cells_`.** A host
+  with 100 environment variables consumes 100 keys and 100 cells before your
+  `.env` file is read. Set `read_process_env_ = false` to reclaim that budget.
+
+## Where to go next
+
+- [Lifecycle](lifecycle) — `init`, `shutdown`, and the threading rules.
+- [The API](api) — `get_env`, `set_env`, and the introspection helpers.
+- [Internals](internals) — the key table, value cells, journal, and version protocol.
