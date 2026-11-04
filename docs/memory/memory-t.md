@@ -5,7 +5,7 @@ without allocating, something has to reserve that memory once and own it — tha
 something is `memory_t`.
 
 ```cpp
-#include "frameworkcpp/memory/memory.hpp">   // memory_t lives here (and the umbrella)
+#include <frameworkcpp/memory/memory.hpp>   // memory_t lives here (and the umbrella)
 ```
 
 The configuration types (`memory_config_t`, `overflow_mode_t`, …) arrive through
@@ -142,3 +142,28 @@ std::cout << "reserved: " << memory.get_capacity() << " bytes\n";
 **When not to cap it:** during development, an unbounded memory lets you move
 fast; the ceiling is for production, where an overshoot should fail loudly at
 startup instead of surfacing as a missed deadline under load.
+
+## Trade-offs
+
+- **The memory store is not movable or copyable.** It owns its `mmap` regions
+  and pins them with an intrusive registry. Keep it in a stable location
+  (a local, a member, or a `std::unique_ptr`) and keep it alive while any
+  shard or slot from it is in use.
+- **Hard limit is enforced on reserved bytes, not live objects.** A partially
+  empty `mmap` region still counts against the limit. This prevents silent
+  paging but means you size for the worst-case reservation, not the steady-state
+  working set.
+- **The shard owns the slot, not the memory store.** Freeing goes through the
+  shard (`shard.deallocate(slot)`), not `memory.deallocate`. The memory store
+  needs no per-slot bookkeeping and stays free of any global "find the owner
+  from the pointer" state.
+- **Growth is all-or-nothing.** When a shard does not fit in the existing
+  regions, the memory store adds a whole new `mmap` segment. You cannot grow
+  by a single page — the minimum growth is a full region. Plan your regions
+  accordingly.
+
+## Where to go next
+
+- [Shards](memory-shard-t) — the slices and how allocation finds the right bucket.
+- [Buckets](memory-bucket) — the pools of same-size slots and how to grab one directly.
+- [Smart Pointers](smart-pointers) — owning and shared pointers that return memory on their own.

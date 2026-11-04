@@ -211,3 +211,9 @@ promised. Read it, copy it, or compare it — but do not stash it across calls.
 The test suite proves it: `tests/environment_heap_test.cpp` overrides
 `operator new`/`delete` and asserts that `init`, `get_env` and `set_env`
 allocate **zero** bytes on the heap.
+
+## Where to go next
+
+- [Lifecycle](lifecycle) — `init`, `shutdown`, and the threading rules.
+- [The API](api) — `get_env`, `set_env`, and the introspection helpers.
+- [Configuration](configuration) — the fixed capacities and how to size the memory.

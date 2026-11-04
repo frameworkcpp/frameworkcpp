@@ -294,5 +294,12 @@ compiler answers the question on each of them. It needs no root and no
 emulation, so it runs in seconds instead of the hours an emulated build takes.
 
 ## What is not implemented yet
+
 - **Automatic rebalancing.** `rebalance()` is a call you make; the reactor does
   not run it on a schedule on its own.
+
+## Where to go next
+
+- [The API](api) — every function, its contract and its failure modes.
+- [Configuration](configuration) — the knobs and how to size the memory.
+- [The Memory Store](../memory/memory-t) — the memory that the reactor carves its state from.

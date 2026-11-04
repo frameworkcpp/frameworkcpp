@@ -104,3 +104,28 @@ references are not part of the memory module yet.
 **When not to reach for these:** every owned pointer stores a shard handle and,
 for the shared one, a control block. If your data never outlives the call, a raw
 slot from a bucket is cheaper and allocation-free.
+
+## Trade-offs
+
+- **Unique has zero overhead; shared has one atomic per copy.** `memory_unique_ptr_t`
+  is a thin wrapper around a raw pointer and a shard handle — move is a pointer
+  copy. `memory_shared_ptr_t` stores the reference count in the same memory block
+  as the object (no separate control block allocation), but every copy and move
+  touches an atomic.
+- **`shared_from_this` requires the right base.** Your type must derive from
+  `memory_enable_shared_from_this_t<T>`; otherwise `shared_from_this()` throws
+  `std::bad_weak_ptr`. This is the same rule as `std::shared_ptr` but the base
+  lives in the memory module.
+- **Weak references are not implemented.** If you need a weak pointer, you must
+  manage the lifetime another way — typically by keeping a `memory_shared_ptr_t`
+  somewhere that outlives the weak user, or by using a raw pointer with a
+  disciplined ownership protocol.
+- **Every owned pointer pins a shard handle.** The shard must outlive the
+  pointer. If you move a `memory_shared_ptr_t` to a thread that outlives the
+  shard, the pointer will dangle when the shard is destroyed.
+
+## Where to go next
+
+- [The Memory Store](memory-t) — owns the memory and carves the shards.
+- [Shards](memory-shard-t) — the slice that holds your buckets.
+- [Buckets](memory-bucket) — the pools of same-size slots.

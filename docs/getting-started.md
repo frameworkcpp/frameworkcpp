@@ -108,12 +108,59 @@ target_link_libraries(app PRIVATE frameworkcpp::frameworkcpp)
 
 int main()
 {
-    frameworkcpp::memory::memory_t memory;
-    // carve a shard (tag 1) with one bucket (tag 0): 64 slots of int.
-    auto shard = memory.create_shard(1, {{0, sizeof(int), alignof(int), 64}});
+    using namespace frameworkcpp;
 
-    auto *p = shard.allocate<int>();   // no malloc, no lock
-    shard.deallocate(p);
+    // 1. Size the memory for everything up front.
+    constexpr memory::memory_config_t mem_cfg{
+        .size_ = 4 * 1024 * 1024,       // initial region: 4 MiB
+        .hard_limit_ = 4 * 1024 * 1024  // hard ceiling
+    };
+    memory::memory_t memory{mem_cfg};
+
+    // 2. Carve a shard for the application's hot data.
+    constexpr std::uint64_t APP_SHARD = 1;
+    constexpr std::uint64_t CMD_BUCKET = 0;
+    auto app_shard = memory.create_shard(APP_SHARD,
+        {{CMD_BUCKET, sizeof(int), alignof(int), 1024}});
+
+    // 3. Initialise the environment module from process env + .env file.
+    environment::environment_config_t env_cfg;
+    env_cfg.dotenv_path_ = "app.env";
+    environment::init(memory, env_cfg);
+
+    // 4. Initialise the reactor: one queue per core, io_uring when available.
+    constexpr reactor::reactor_config_t rea_cfg{
+        .queues_ = 4,
+        .max_jobs_per_queue_ = 1024,
+        .affinity_ = true
+    };
+    constexpr std::size_t rea_bytes = reactor::precompute(rea_cfg);
+    constexpr std::size_t total_bytes = mem_cfg.size_ + rea_bytes;
+    memory::memory_config_t combined{.size_ = total_bytes};
+    memory::memory_t combined_memory{combined};
+
+    reactor::reactor_t reactor;
+    reactor.bind_memory(combined_memory, rea_cfg);
+
+    // 5. Use them: allocate, configure, serve.
+    auto *cmd = app_shard.allocate<int>();
+    *cmd = 42;
+    app_shard.deallocate(cmd);
+
+    const auto level = environment::get_env("LOG_LEVEL", "info");
+    environment::set_env("WORKERS", "8");
+
+    auto *queue = reactor.get_or_create("ingest");
+    auto fd = socket(AF_INET, SOCK_STREAM, 0);
+    auto sock = reactor.create_socket(fd, queue);
+    // sock.recv(...), sock.send(...) ...
+
+    reactor.run_all();
+    // ... serve ...
+
+    reactor.stop_all();
+    environment::shutdown();
+    // memory destroyed here, reclaiming everything
 }
 ```
 

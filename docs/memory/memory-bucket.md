@@ -9,7 +9,7 @@ as one `object_spec_t` entry, and you later grab a handle to it with
 `shard.get_bucket(tag, concurrency_model_t)`.
 
 ```cpp
-#include "frameworkcpp/memory/memory.hpp">   // to build the memory store + shard in the examples
+#include <frameworkcpp/memory/memory.hpp>   // to build the memory store + shard in the examples
 ```
 
 The handle itself — `memory_bucket_t` — lives in
@@ -88,3 +88,31 @@ auto* slot = bucket.allocate<std::uint64_t>(); // only ever from bucket 0
 if (slot) *slot = 7;
 bucket.deallocate(slot);
 ```
+
+## Trade-offs
+
+- **Model is fixed on first grab.** The first `get_bucket(tag, model)` call
+  locks the concurrency model for that tag. Requesting a different model later
+  aborts — this is deliberate: the model is part of the bucket's contract, not
+  a per-call convenience. Design your concurrency before you grab the bucket.
+- **No cross-bucket allocation.** A bucket handle only allocates from its own
+  pool. If you ask for a size larger than the bucket's `object_size_`, you get
+  `nullptr` — there is no fallback search across buckets. Size your buckets for
+  the peak request you will make through them.
+- **`single_thread_` is free but unchecked in release.** In debug builds the
+  framework aborts if a second thread allocates from a `single_thread_` bucket.
+  In release builds it is plain loads and stores — you get the speed but no
+  safety net. Use it only when the ownership is truly single-threaded.
+- **`lock_free_` uses a bounded ring, not a growable list.** When the free-list
+  is empty, allocation fails. It never spins on a CAS loop forever — you get
+  `nullptr` immediately. This is predictable but means you must size the pool
+  for the worst-case concurrent outstanding allocations.
+- **Header overhead is per-slot.** Every slot carries a small header (the
+  owning bucket's offset) so `deallocate` knows where to return it. For very
+  small objects this overhead is a larger fraction of the block.
+
+## Where to go next
+
+- [The Memory Store](memory-t) — owns the memory and carves the shards.
+- [Shards](memory-shard-t) — the slice that holds your buckets.
+- [Smart Pointers](smart-pointers) — RAII owners that return memory on their own.

@@ -459,3 +459,33 @@ struct op_result_t {
 - **Migration needs an idle socket.** A socket with an operation in flight
   cannot move, because the queue that will complete that operation has to be
   the one that owns the connection.
+
+## Trade-offs
+
+- **Function pointers over lambdas.** You pass a `void *` context and a function
+  address instead of a capturing lambda. This means no heap allocation for the
+  handler, but you must manage the context struct's lifetime manually (usually
+  by carving it from the memory store).
+- **Fixed operation pool depth.** `max_jobs_per_queue_` bounds how many
+  operations can be in flight. When the pool is empty, `post` returns `false`
+  immediately — there is no queueing, no blocking, no back-off. You must
+  size the pool for the peak concurrent connections and handle the `false`
+  return as back-pressure.
+- **Single consumer per queue.** Each queue has exactly one thread that runs
+  the event loop. The reactor does not support multiple consumers on the same
+  queue. If you need more throughput, add more queues and pin each to its own
+  core with `affinity_`.
+- **`io_uring` is the fast path, `epoll` is the portable path.** The same API
+  runs on both, but the timing differs: `epoll` has millisecond timer precision
+  and one syscall per event; `io_uring` has nanosecond precision and batches
+  syscalls. Your deadlines must tolerate the backend the kernel gives you.
+- **One pending read and one pending write per socket.** A second read on the
+  same socket completes with `EALREADY`. This prevents unbounded operation
+  growth but means you must not post a read until the previous one has
+  completed (or was cancelled).
+
+## Where to go next
+
+- [Configuration](configuration) — the knobs and how to size the memory.
+- [Internals](internals) — the ring, the operation pool, and the strand protocol.
+- [The Memory Store](../memory/memory-t) — the memory that the reactor carves its state from.
