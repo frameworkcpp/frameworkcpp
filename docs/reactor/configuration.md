@@ -73,9 +73,9 @@ strand model is about submission, not about running two handlers at once.
 
 ```cpp
 enum class backend_t : std::uint8_t {
-  auto_ = 0,     // io_uring si el kernel lo expone, si no epoll
-  io_uring_ = 1, // exigir io_uring: bind_memory falla si no esta
-  epoll_ = 2,    // exigir epoll
+  auto_ = 0,     // io_uring if the kernel exposes it, else epoll
+  io_uring_ = 1, // require io_uring: bind_memory fails if unavailable
+  epoll_ = 2,    // require epoll
 };
 ```
 
